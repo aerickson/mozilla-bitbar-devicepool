@@ -179,6 +179,7 @@ device_groups:
   motog4-docker-builder-2:
     Docker Builder:
   test-1:
+    pixel6-04:
     # motog5-38:  # 11/30/22: disabling all g5, not used any longer
   test-2:
     # motog5-40:  # disabled due to a51 device increases (3/29/22)

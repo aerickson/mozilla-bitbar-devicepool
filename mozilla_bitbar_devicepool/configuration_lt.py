@@ -14,7 +14,7 @@ from mozilla_bitbar_devicepool.util.template import apply_dict_defaults
 
 
 class ConfigurationLt(object):
-    def __init__(self, ci_mode_envvars=False, ci_mode_fs=False, quiet=False):
+    def __init__(self, ci_mode_envvars=False, ci_mode_fs=False, quiet=False, lightweight=False):
         # TODO?: mash all values into 'config'?
         self.config = {}
         #
@@ -23,6 +23,8 @@ class ConfigurationLt(object):
         self.ci_mode_envvars = ci_mode_envvars
         self.ci_mode_fs = ci_mode_fs
         self.quiet = quiet
+        # lightweight mode: skip TC env var loading (for tools that only need device config)
+        self.lightweight = lightweight
         # see _set_fully_configured_projects() for details
         self.fully_configured_projects = {}
 
@@ -223,14 +225,16 @@ class ConfigurationLt(object):
 
         # set project values/flags
         # set this flag so downstream jobs can short-circuit if a project isn't configured
-        self._set_fully_configured_projects()
+        if not self.lightweight:
+            self._set_fully_configured_projects()
         self._set_disabled()
 
         # validate the configuration
         self._validate_device_groups()
 
         # set config-wide values
-        self._load_tc_env_vars()
+        if not self.lightweight:
+            self._load_tc_env_vars()
         self._set_lt_api_key()
         self._set_lt_username()
         self._set_global_contract_device_count()

@@ -50,6 +50,7 @@ lt_compare_to_api = 'mozilla_bitbar_devicepool.compare_to_api_lt:main'
 lt_failure_report = 'mozilla_bitbar_devicepool.lambdatest.status:lt_failed_job_report'
 lt_success_rate_report = 'mozilla_bitbar_devicepool.lambdatest.status:lt_success_rate_report'
 lt_job_distribution_report = 'mozilla_bitbar_devicepool.reporting.main:job_distribution_report'
+lt_run_cmd = 'mozilla_bitbar_devicepool.run_cmd_lt:main'
 
 [build-system]
 requires = ["poetry-core"]

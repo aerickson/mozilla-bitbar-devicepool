@@ -15,7 +15,10 @@ def main():
     parser = argparse.ArgumentParser(
         description="Run an arbitrary ADB shell command on LambdaTest Android devices via HyperExecute"
     )
-    parser.add_argument("command", help="ADB shell command to run on devices")
+    parser.add_argument("command", nargs="?", help="ADB shell command to run on devices")
+    parser.add_argument(
+        "--script", metavar="FILE", help="Local shell script to run on device host (has DEVICE_SERIAL env var)"
+    )
 
     device_group = parser.add_mutually_exclusive_group(required=True)
     device_group.add_argument("--group", "-g", action="append", metavar="GROUP", help="Device group name (repeatable)")
@@ -43,6 +46,13 @@ def main():
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
 
     args = parser.parse_args()
+
+    if not args.command and not args.script:
+        parser.error("one of command or --script is required")
+    if args.command and args.script:
+        parser.error("command and --script are mutually exclusive")
+    if args.script and not os.path.isfile(args.script):
+        parser.error(f"script file not found: {args.script}")
 
     log_level = logging.DEBUG if args.verbose else logging.INFO
     logging.basicConfig(level=log_level, format="%(asctime)s %(threadName)s %(levelname)s %(message)s")
@@ -78,7 +88,10 @@ def main():
         sys.exit(1)
 
     print(f"Targeting {len(udids)} device(s): {', '.join(udids)}")
-    print(f"Command: {args.command}")
+    if args.script:
+        print(f"Script: {args.script}")
+    else:
+        print(f"Command: {args.command}")
     print()
 
     # resolve paths
@@ -98,6 +111,7 @@ def main():
         max_parallel=args.parallel,
         timeout=args.timeout,
         queue_timeout=args.queue_timeout,
+        script_path=args.script,
     )
 
     print(run_cmd.format_results(results, args.output_format))

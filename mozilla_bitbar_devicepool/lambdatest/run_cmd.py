@@ -57,7 +57,7 @@ framework:
     return config
 
 
-def run_on_device(udid, command, project_root_dir, user_script_dir, timeout=300, queue_timeout=300):
+def run_on_device(udid, command, project_root_dir, user_script_dir, timeout=300, queue_timeout=300, script_path=None):
     timestamp = time.time_ns()
     temp_dir = f"/tmp/mozilla-lt-run-cmd.{udid}.{timestamp}"
     artifacts_dir = os.path.join(temp_dir, "artifacts")
@@ -69,6 +69,11 @@ def run_on_device(udid, command, project_root_dir, user_script_dir, timeout=300,
         os.makedirs(artifacts_dir, exist_ok=True)
 
         shutil.copytree(user_script_dir, os.path.join(temp_dir, "user_script"))
+
+        if script_path:
+            dest = os.path.join(temp_dir, "user_script", "run_script.sh")
+            shutil.copy2(script_path, dest)
+            os.chmod(dest, 0o755)
 
         config = generate_config(udid, command, queue_timeout=queue_timeout)
         with open(config_path, "w") as f:
@@ -161,13 +166,13 @@ def _parse_stdout_markers(stdout):
 
 
 def run_on_all_devices(
-    udids, command, project_root_dir, user_script_dir, max_parallel=10, timeout=300, queue_timeout=300
+    udids, command, project_root_dir, user_script_dir, max_parallel=10, timeout=300, queue_timeout=300, script_path=None
 ):
     results = {}
     with ThreadPoolExecutor(max_workers=max_parallel) as executor:
         futures = {
             executor.submit(
-                run_on_device, udid, command, project_root_dir, user_script_dir, timeout, queue_timeout
+                run_on_device, udid, command, project_root_dir, user_script_dir, timeout, queue_timeout, script_path
             ): udid
             for udid in udids
         }

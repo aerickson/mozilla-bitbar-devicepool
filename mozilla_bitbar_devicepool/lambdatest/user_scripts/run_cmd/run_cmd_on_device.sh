@@ -19,16 +19,23 @@ if [ -z "$DEVICE_SERIAL" ]; then
     exit 1
 fi
 
-if [ -z "$CMD_TO_RUN" ]; then
-    echo "ERROR: CMD_TO_RUN env var not set"
-    echo "" > output.txt
-    exit 1
-fi
+THIS_SCRIPT_DIR=$(dirname "$0")
 
-echo "CMD_TO_RUN=$CMD_TO_RUN"
 echo "CMD_OUTPUT_START"
-adb -s "$DEVICE_SERIAL" shell "$CMD_TO_RUN" | tee output.txt
-CMD_EXIT_CODE=${PIPESTATUS[0]}
+if [ -f "$THIS_SCRIPT_DIR/run_script.sh" ]; then
+    echo "running run_script.sh (DEVICE_SERIAL=$DEVICE_SERIAL)"
+    export DEVICE_SERIAL
+    bash "$THIS_SCRIPT_DIR/run_script.sh" | tee output.txt
+    CMD_EXIT_CODE=${PIPESTATUS[0]}
+elif [ -n "$CMD_TO_RUN" ]; then
+    echo "CMD_TO_RUN=$CMD_TO_RUN"
+    adb -s "$DEVICE_SERIAL" shell "$CMD_TO_RUN" | tee output.txt
+    CMD_EXIT_CODE=${PIPESTATUS[0]}
+else
+    echo "ERROR: no CMD_TO_RUN env var and no run_script.sh found"
+    echo "" > output.txt
+    CMD_EXIT_CODE=1
+fi
 echo "CMD_OUTPUT_END"
 echo "CMD_EXIT_CODE=$CMD_EXIT_CODE"
 

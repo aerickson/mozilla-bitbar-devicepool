@@ -27,6 +27,7 @@ ruamel-yaml = "^0.18.15"
 pyyaml = "^6.0.2"
 taskcluster = "^90.0.4"
 natsort = "^8.4.0"
+tqdm = "^4.67.3"
 
 [tool.poetry.group.dev.dependencies]
 pre-commit = "^4.1.0"

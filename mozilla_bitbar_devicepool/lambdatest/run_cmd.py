@@ -9,8 +9,10 @@ import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+from tqdm import tqdm
 
-def generate_config(udid, command, queue_timeout=300):
+
+def generate_config(udid, command, queue_timeout=900):
     fixed_ip_line = f'fixedIP: "{udid}"'
     config = f"""version: "0.2"
 
@@ -57,7 +59,7 @@ framework:
     return config
 
 
-def run_on_device(udid, command, project_root_dir, user_script_dir, timeout=300, queue_timeout=300, script_path=None):
+def run_on_device(udid, command, project_root_dir, user_script_dir, timeout=1800, queue_timeout=900, script_path=None):
     timestamp = time.time_ns()
     temp_dir = f"/tmp/mozilla-lt-run-cmd.{udid}.{timestamp}"
     artifacts_dir = os.path.join(temp_dir, "artifacts")
@@ -165,22 +167,86 @@ def _parse_stdout_markers(stdout):
     return None
 
 
-def run_on_all_devices(
-    udids, command, project_root_dir, user_script_dir, max_parallel=10, timeout=300, queue_timeout=300, script_path=None
+def _run_batch(
+    udids,
+    command,
+    project_root_dir,
+    user_script_dir,
+    max_parallel,
+    timeout,
+    queue_timeout,
+    script_path,
+    label="",
+    start_delay=5,
 ):
     results = {}
     with ThreadPoolExecutor(max_workers=max_parallel) as executor:
-        futures = {
-            executor.submit(
+        futures = {}
+        for i, udid in enumerate(udids):
+            if i > 0 and start_delay > 0:
+                time.sleep(start_delay)
+            future = executor.submit(
                 run_on_device, udid, command, project_root_dir, user_script_dir, timeout, queue_timeout, script_path
-            ): udid
-            for udid in udids
-        }
-        for future in as_completed(futures):
-            udid, output, success = future.result()
-            results[udid] = (output, success)
-            status = "OK" if success else "FAILED"
-            logging.info(f"  [{status}] {udid}")
+            )
+            futures[future] = udid
+        with tqdm(total=len(futures), desc=label or "devices", unit="device", ncols=80) as bar:
+            for future in as_completed(futures):
+                udid, output, success = future.result()
+                results[udid] = (output, success)
+                status = "OK" if success else "FAIL"
+                bar.set_postfix_str(f"{udid} [{status}]")
+                bar.update(1)
+    return results
+
+
+def run_on_all_devices(
+    udids,
+    command,
+    project_root_dir,
+    user_script_dir,
+    max_parallel=100,
+    timeout=1800,
+    queue_timeout=900,
+    script_path=None,
+    max_retries=5,
+    retry_wait=10,
+    start_delay=1,
+):
+    results = _run_batch(
+        udids,
+        command,
+        project_root_dir,
+        user_script_dir,
+        max_parallel,
+        timeout,
+        queue_timeout,
+        script_path,
+        label="attempt 1",
+        start_delay=start_delay,
+    )
+
+    for attempt in range(1, max_retries + 1):
+        failed = [udid for udid, (_, success) in results.items() if not success]
+        if not failed:
+            break
+        logging.info(
+            f"Retry {attempt}/{max_retries}: {len(failed)} device(s) failed, waiting {retry_wait}s before retrying..."
+        )
+        time.sleep(retry_wait)
+        retry_results = _run_batch(
+            failed,
+            command,
+            project_root_dir,
+            user_script_dir,
+            max_parallel,
+            timeout,
+            queue_timeout,
+            script_path,
+            label=f"retry {attempt}/{max_retries}",
+            start_delay=start_delay,
+        )
+        results.update(retry_results)
+
     return results
 
 

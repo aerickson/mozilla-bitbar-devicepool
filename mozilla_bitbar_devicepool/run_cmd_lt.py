@@ -7,8 +7,18 @@ import logging
 import os
 import sys
 
+from tqdm import tqdm
+
 from mozilla_bitbar_devicepool import configuration_lt
 from mozilla_bitbar_devicepool.lambdatest import run_cmd
+
+
+class _TqdmLoggingHandler(logging.Handler):
+    def emit(self, record):
+        try:
+            tqdm.write(self.format(record))
+        except Exception:
+            self.handleError(record)
 
 
 def main():
@@ -28,17 +38,30 @@ def main():
     device_group.add_argument("--all", action="store_true", help="Run on all devices in all groups")
 
     parser.add_argument(
-        "--parallel", "-p", type=int, default=10, metavar="N", help="Max parallel HyperExecute jobs (default: 10)"
+        "--parallel", "-p", type=int, default=100, metavar="N", help="Max parallel HyperExecute jobs (default: 100)"
     )
     parser.add_argument(
-        "--timeout", type=int, default=300, metavar="SECS", help="Per-device job timeout in seconds (default: 300)"
+        "--start-delay",
+        type=int,
+        default=1,
+        metavar="SECS",
+        help="Seconds between job submissions to avoid overwhelming the API (default: 1)",
+    )
+    parser.add_argument(
+        "--timeout", type=int, default=1800, metavar="SECS", help="Per-device job timeout in seconds (default: 1800)"
     )
     parser.add_argument(
         "--queue-timeout",
         type=int,
-        default=300,
+        default=900,
         metavar="SECS",
-        help="Device queue timeout in seconds, must be 300-900 (default: 300)",
+        help="Device queue timeout in seconds, must be 300-900 (default: 900)",
+    )
+    parser.add_argument(
+        "--retries", type=int, default=5, metavar="N", help="Max retries for failed devices (default: 5)"
+    )
+    parser.add_argument(
+        "--retry-wait", type=int, default=10, metavar="SECS", help="Seconds to wait between retries (default: 10)"
     )
     parser.add_argument(
         "--output-format", choices=["text", "json", "csv"], default="text", help="Output format (default: text)"
@@ -54,8 +77,10 @@ def main():
     if args.script and not os.path.isfile(args.script):
         parser.error(f"script file not found: {args.script}")
 
-    log_level = logging.DEBUG if args.verbose else logging.INFO
-    logging.basicConfig(level=log_level, format="%(asctime)s %(threadName)s %(levelname)s %(message)s")
+    log_level = logging.DEBUG if args.verbose else logging.WARNING
+    handler = _TqdmLoggingHandler()
+    handler.setFormatter(logging.Formatter("%(asctime)s %(threadName)s %(levelname)s %(message)s"))
+    logging.basicConfig(level=log_level, handlers=[handler])
 
     config_object = configuration_lt.ConfigurationLt(lightweight=True)
     config_object.configure()
@@ -112,6 +137,9 @@ def main():
         timeout=args.timeout,
         queue_timeout=args.queue_timeout,
         script_path=args.script,
+        max_retries=args.retries,
+        retry_wait=args.retry_wait,
+        start_delay=args.start_delay,
     )
 
     print(run_cmd.format_results(results, args.output_format))

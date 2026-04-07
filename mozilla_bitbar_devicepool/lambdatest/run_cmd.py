@@ -221,7 +221,7 @@ def run_on_all_devices(
         timeout,
         queue_timeout,
         script_path,
-        label="attempt 1",
+        label=f"attempt 1/{max_retries + 1}",
         start_delay=start_delay,
     )
 
@@ -230,7 +230,7 @@ def run_on_all_devices(
         if not failed:
             break
         logging.info(
-            f"Retry {attempt}/{max_retries}: {len(failed)} device(s) failed, waiting {retry_wait}s before retrying..."
+            f"attempt {attempt + 1}/{max_retries + 1}: {len(failed)} device(s) failed, waiting {retry_wait}s..."
         )
         time.sleep(retry_wait)
         retry_results = _run_batch(
@@ -242,7 +242,7 @@ def run_on_all_devices(
             timeout,
             queue_timeout,
             script_path,
-            label=f"retry {attempt}/{max_retries}",
+            label=f"attempt {attempt + 1}/{max_retries + 1}",
             start_delay=start_delay,
         )
         results.update(retry_results)

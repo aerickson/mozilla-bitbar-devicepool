@@ -136,14 +136,19 @@ def main():
     print(f"Report: {report_path}")
     print(f"Spawning {len(udids)} HyperExecute jobs (1s delay between submissions)...")
 
-    def write_report(partial_results):
-        formatted = run_cmd.format_results(partial_results, args.format)
+    def write_report(partial_results, final=False):
+        if final:
+            display = partial_results
+        else:
+            display = {udid: v for udid, v in partial_results.items() if v[1] == "ok"}
+        formatted = run_cmd.format_results(display, args.format)
         n_ok = sum(1 for _, (_, s) in partial_results.items() if s == "ok")
+        status_note = "" if final else f" ({n_ok}/{len(partial_results)} completed so far)"
         with open(report_path, "w") as f:
             f.write("# lt_run_cmd report\n\n")
             f.write(f"**Date:** {start_time}\n\n")
             f.write(f"**Command/script:** `{cmd_or_script}`\n\n")
-            f.write(f"**Devices targeted:** {len(udids)} ({n_ok}/{len(partial_results)} complete so far)\n\n")
+            f.write(f"**Devices targeted:** {len(udids)}{status_note}\n\n")
             f.write("## Results\n\n")
             f.write("```\n")
             f.write(formatted)
@@ -164,7 +169,7 @@ def main():
         on_update=write_report,
     )
 
-    write_report(results)
+    write_report(results, final=True)
     formatted = run_cmd.format_results(results, args.format)
     print(formatted)
     print(f"\nReport: {report_path}")

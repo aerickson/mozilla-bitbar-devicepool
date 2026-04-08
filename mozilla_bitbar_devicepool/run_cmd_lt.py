@@ -3,6 +3,7 @@
 # You can obtain one at http://mozilla.org/MPL/2.0/.
 
 import argparse
+import datetime
 import logging
 import os
 import sys
@@ -64,7 +65,7 @@ def main():
         "--retry-wait", type=int, default=10, metavar="SECS", help="Seconds to wait between retries (default: 10)"
     )
     parser.add_argument(
-        "--output-format", choices=["text", "json", "csv"], default="text", help="Output format (default: text)"
+        "--format", choices=["text", "json", "csv"], default="text", help="Output format (default: text)"
     )
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
 
@@ -142,7 +143,22 @@ def main():
         start_delay=args.start_delay,
     )
 
-    print(run_cmd.format_results(results, args.output_format))
+    formatted = run_cmd.format_results(results, args.format)
+    print(formatted)
+
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    report_path = f"lt_run_cmd_output_{timestamp}.md"
+    cmd_or_script = args.script if args.script else args.command
+    with open(report_path, "w") as f:
+        f.write(f"# lt_run_cmd report\n\n")
+        f.write(f"**Date:** {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+        f.write(f"**Command/script:** `{cmd_or_script}`\n\n")
+        f.write(f"**Devices targeted:** {len(udids)}\n\n")
+        f.write("## Results\n\n")
+        f.write("```\n")
+        f.write(formatted)
+        f.write("```\n")
+    print(f"\nReport written to: {report_path}")
 
     failed = [udid for udid, (_, success) in results.items() if not success]
     if failed:

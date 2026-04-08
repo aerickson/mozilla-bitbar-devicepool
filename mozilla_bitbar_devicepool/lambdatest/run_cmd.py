@@ -218,7 +218,7 @@ def _run_batch(
                 if status == "ok":
                     succeeded += 1
                 bar_status = {"ok": "OK", "failed": "FAIL", "queue_timeout": "TIMEOUT"}.get(status, status)
-                bar.set_postfix_str(f"{succeeded}/{len(futures)} ok, {udid} [{bar_status}]")
+                bar.set_postfix_str(f"{succeeded}/{len(futures)} completed, {udid} [{bar_status}]")
                 bar.update(1)
                 if on_update:
                     on_update(results)

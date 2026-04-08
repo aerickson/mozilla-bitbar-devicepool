@@ -134,6 +134,7 @@ def main():
     cmd_or_script = args.script if args.script else args.command
     start_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"Report: {report_path}")
+    print(f"Spawning {len(udids)} HyperExecute jobs (1s delay between submissions)...")
 
     def write_report(partial_results):
         formatted = run_cmd.format_results(partial_results, args.format)

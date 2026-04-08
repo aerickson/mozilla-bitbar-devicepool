@@ -4,13 +4,16 @@
 # Runs on the LT HOST machine via run_cmd_lt --script.
 # Does NOT require a connected Android device.
 #
+# USB_POWER_METER_SERIAL_NUMBER must match the USB serial number descriptor
+# of the power meter (set from PowerMeterSerial -> USB_POWER_METER_SERIAL_NUMBER
+# in entrypoint.py, consumed by usb-power-profiling via dev.serialNumber).
+#
+# The AVHzy CT-3 (Shizuku) communicates via USB BULK ENDPOINTS (libusb),
+# NOT /dev/ttyUSB*. VID:PID is 0483:fffe/ffff/374b (STMicro).
+#
 # Usage:
 #   run_cmd_lt --script scripts/check_power_meter.sh --group a55-perf
 #   run_cmd_lt --script scripts/check_power_meter.sh --device <UDID>
-#
-# The AVHzy CT-3 appears as a CDC serial device (/dev/ttyUSB* or /dev/ttyACM*).
-# It streams data continuously in packets: [0xa5][LEN_LE4][DATA...][0x5a]
-# at 115200 baud.
 
 set -o pipefail
 
@@ -18,6 +21,7 @@ echo "=== AVHzy CT-3 Power Meter Diagnostic ==="
 echo "Date: $(date)"
 echo "Host: $(hostname)"
 echo "User: $(id)"
+echo "USB_POWER_METER_SERIAL_NUMBER: ${USB_POWER_METER_SERIAL_NUMBER:-(not set)}"
 echo ""
 
 # --- USB device enumeration ---
@@ -31,50 +35,16 @@ else
 fi
 echo ""
 
-echo "=== USB Serial by-id ==="
-if [ -d /dev/serial/by-id ]; then
-    ls -la /dev/serial/by-id/
-else
-    echo "(no /dev/serial/by-id/)"
-fi
+echo "=== lsusb: AVHzy VID 0483 ==="
+lsusb -d 0483: 2>/dev/null || echo "(none found with VID 0483)"
 echo ""
 
-# --- Serial port detection ---
-echo "=== Serial Ports ==="
-FOUND_PORTS=()
-for port in /dev/ttyUSB0 /dev/ttyUSB1 /dev/ttyUSB2 /dev/ttyUSB3 \
-            /dev/ttyACM0 /dev/ttyACM1 /dev/ttyACM2 /dev/ttyACM3; do
-    if [ -c "$port" ]; then
-        echo "  FOUND: $(ls -la $port)"
-        FOUND_PORTS+=("$port")
-    fi
-done
-if [ ${#FOUND_PORTS[@]} -eq 0 ]; then
-    echo "  NONE: no ttyUSB or ttyACM devices found"
-fi
+echo "=== USB bus devices ==="
+ls -la /dev/bus/usb/ 2>/dev/null || echo "(no /dev/bus/usb/)"
 echo ""
 
-# --- Read data from the serial port ---
-if [ ${#FOUND_PORTS[@]} -eq 0 ]; then
-    echo "=== RESULT: FAIL - no serial port found ==="
-    echo "Power meter not detected.  Check USB cable and host USB port."
-    exit 1
-fi
-
-PORT="${FOUND_PORTS[0]}"
-echo "=== Reading from $PORT ==="
-
-# Check group membership for dialout/tty access
-OWNER_GROUP=$(stat -c '%G' "$PORT" 2>/dev/null || stat -f '%Sg' "$PORT" 2>/dev/null)
-echo "Port group: $OWNER_GROUP"
-if ! groups | grep -qw "$OWNER_GROUP"; then
-    echo "WARNING: current user is not in group '$OWNER_GROUP' - may get permission denied"
-    echo "  Fix: sudo usermod -aG $OWNER_GROUP \$USER  (then re-login)"
-fi
-echo ""
-
-# Try pyserial; install it if missing
-echo "=== Python / pyserial ==="
+# --- Python / pyusb setup ---
+echo "=== Python / pyusb ==="
 PYTHON=$(command -v python3 || command -v python)
 if [ -z "$PYTHON" ]; then
     echo "ERROR: python3 not found"
@@ -82,73 +52,231 @@ if [ -z "$PYTHON" ]; then
 fi
 echo "Python: $PYTHON ($($PYTHON --version))"
 
-$PYTHON -c "import serial" 2>/dev/null || {
-    echo "pyserial not installed, installing..."
-    pip3 install --quiet pyserial 2>&1 | tail -2
+$PYTHON -c "import usb.core" 2>/dev/null || {
+    echo "pyusb not installed, installing..."
+    pip3 install --quiet pyusb 2>&1 | tail -2
 }
 echo ""
 
-echo "=== Serial Read Test ==="
-$PYTHON - "$PORT" <<'PYEOF'
+# --- Main USB diagnostic ---
+echo "=== USB Device Enumeration and Test ==="
+$PYTHON - "${USB_POWER_METER_SERIAL_NUMBER:-}" <<'PYEOF'
 import sys
-import time
+import os
 
-port_path = sys.argv[1]
-BAUD = 115200
-READ_BYTES = 256
-READ_TIMEOUT = 3.0
+target_serial = sys.argv[1] if len(sys.argv) > 1 else ""
 
 try:
-    import serial
+    import usb.core
+    import usb.util
 except ImportError:
-    print("FAIL: pyserial not available - cannot run read test")
+    print("FAIL: pyusb not available")
     sys.exit(1)
 
-print(f"Opening {port_path} at {BAUD} baud (timeout={READ_TIMEOUT}s)...")
-try:
-    ser = serial.Serial(port_path, baudrate=BAUD, timeout=READ_TIMEOUT)
-except serial.SerialException as e:
-    print(f"FAIL: cannot open port: {e}")
+# AVHzy CT-3 (Shizuku) VID:PIDs - same as usb-power-profiling
+VENDOR_ID = 0x0483
+PRODUCT_IDS = [0xFFFE, 0xFFFF, 0x374B]
+
+# Find all matching devices
+all_avhzy = []
+for pid in PRODUCT_IDS:
+    found = usb.core.find(find_all=True, idVendor=VENDOR_ID, idProduct=pid)
+    if found:
+        all_avhzy.extend(found)
+
+print(f"Found {len(all_avhzy)} AVHzy/Shizuku device(s) (VID 0x0483):")
+if not all_avhzy:
+    print("  NONE")
+    print()
+    print("FAIL: no AVHzy power meter visible on USB bus")
+    print("  Check: is the USB device bind-mounted into this container?")
+    print("  Check: does /dev/bus/usb/ contain the device?")
     sys.exit(1)
 
-print(f"Port opened OK")
-print(f"Waiting up to {READ_TIMEOUT}s for {READ_BYTES} bytes...")
+for dev in all_avhzy:
+    try:
+        serial = usb.util.get_string(dev, dev.iSerialNumber) if dev.iSerialNumber else None
+    except Exception as e:
+        serial = f"(error reading serial: {e})"
+    print(f"  Bus {dev.bus:03d} Device {dev.address:03d}: "
+          f"VID:PID {dev.idVendor:04x}:{dev.idProduct:04x}  serial={serial!r}")
+print()
 
-data = ser.read(READ_BYTES)
-ser.close()
+# Match by serial number
+if target_serial:
+    matched = []
+    for dev in all_avhzy:
+        try:
+            serial = usb.util.get_string(dev, dev.iSerialNumber) if dev.iSerialNumber else None
+        except Exception:
+            serial = None
+        if serial == target_serial:
+            matched.append((dev, serial))
 
-if not data:
-    print("FAIL: no data received within timeout")
-    print("  The device may be off, unpowered, or not transmitting.")
-    sys.exit(1)
+    if not matched:
+        print(f"FAIL: no device found with serial number {target_serial!r}")
+        serials = []
+        for dev in all_avhzy:
+            try:
+                s = usb.util.get_string(dev, dev.iSerialNumber) if dev.iSerialNumber else None
+                serials.append(s)
+            except Exception:
+                serials.append("(unreadable)")
+        print(f"  Available serial numbers: {serials}")
+        sys.exit(1)
 
-hex_str = " ".join(f"{b:02x}" for b in data)
-print(f"Read {len(data)} bytes:")
-print(f"  hex: {hex_str}")
+    if len(matched) > 1:
+        print(f"WARNING: {len(matched)} devices match serial {target_serial!r}, using first")
 
-# Check for AVHzy CT-3 packet framing: 0xa5 start, 0x5a end
-if 0xa5 in data:
-    idx = data.index(0xa5)
-    print(f"  PASS: found 0xa5 packet-start marker at offset {idx}")
-    # Try to find matching 0x5a end marker
-    end_idx = data.find(0x5a, idx + 1)
-    if end_idx != -1:
-        pkt_len = end_idx - idx + 1
-        pkt = data[idx:end_idx + 1]
-        pkt_hex = " ".join(f"{b:02x}" for b in pkt)
-        print(f"  PASS: found 0x5a packet-end marker at offset {end_idx} "
-              f"(packet length {pkt_len})")
-        print(f"  Packet: {pkt_hex}")
-    else:
-        print("  INFO: 0x5a end marker not yet seen in this window (normal if buffer is mid-packet)")
-    print("")
-    print("RESULT: PASS - power meter is connected and streaming data")
+    target_dev, target_dev_serial = matched[0]
+    print(f"Matched device by serial number {target_serial!r}: "
+          f"Bus {target_dev.bus:03d} Device {target_dev.address:03d}")
 else:
-    print("  WARN: no 0xa5 start marker in received data")
-    print("  Received data does not match expected AVHzy CT-3 format.")
-    print("  Possible causes: wrong baud rate, wrong device, device not in measurement mode.")
-    print("")
-    print("RESULT: UNCERTAIN - data received but not AVHzy CT-3 format")
+    print(f"WARNING: USB_POWER_METER_SERIAL_NUMBER not set")
+    if len(all_avhzy) > 1:
+        print(f"WARNING: {len(all_avhzy)} AVHzy devices found - cannot identify correct one")
+        print("  Set USB_POWER_METER_SERIAL_NUMBER to disambiguate")
+        sys.exit(1)
+    target_dev = all_avhzy[0]
+    print(f"Using only available AVHzy device: "
+          f"Bus {target_dev.bus:03d} Device {target_dev.address:03d}")
+print()
+
+# Try to open and claim the device (same first step as usb-power-profiling)
+print("=== USB Access Test ===")
+print(f"Attempting to open device and claim interface...")
+try:
+    target_dev.set_configuration()
+    cfg = target_dev.get_active_configuration()
+    intf = cfg[(0, 0)]
+
+    # Find bulk IN and OUT endpoints (same as findBulkInOutEndPoints in usb-power-profiling)
+    ep_in = usb.util.find_descriptor(
+        intf,
+        custom_match=lambda e: (
+            usb.util.endpoint_direction(e.bEndpointAddress) == usb.util.ENDPOINT_IN
+            and usb.util.endpoint_type(e.bmAttributes) == usb.util.ENDPOINT_TYPE_BULK
+        )
+    )
+    ep_out = usb.util.find_descriptor(
+        intf,
+        custom_match=lambda e: (
+            usb.util.endpoint_direction(e.bEndpointAddress) == usb.util.ENDPOINT_OUT
+            and usb.util.endpoint_type(e.bmAttributes) == usb.util.ENDPOINT_TYPE_BULK
+        )
+    )
+
+    if ep_in is None or ep_out is None:
+        print(f"FAIL: bulk endpoints not found (in={ep_in}, out={ep_out})")
+        sys.exit(1)
+
+    print(f"PASS: bulk endpoint IN  = 0x{ep_in.bEndpointAddress:02x}")
+    print(f"PASS: bulk endpoint OUT = 0x{ep_out.bEndpointAddress:02x}")
+    print()
+except usb.core.USBError as e:
+    print(f"FAIL: USB error accessing device: {e}")
+    print("  Check: does the container have access to /dev/bus/usb/?")
+    print("  Check: is another process (usb-power-profiling) holding the device?")
+    sys.exit(1)
+
+# Send CMD_STOP then CMD_START_SAMPLING and read one data packet
+# Frame format: [0xa5][len_le32][payload][xor_checksum][0x5a]
+import struct
+
+BEGIN = 0xa5
+END   = 0x5a
+CMD_STOP            = 0x07
+CMD_START_SAMPLING  = 0x09
+
+def make_frame(cmd, args=(), request_id=0):
+    payload = bytes([0x01, cmd, request_id, 0x00] + list(args))
+    checksum = 0
+    for b in payload:
+        checksum ^= b
+    frame = bytes([BEGIN]) + struct.pack("<I", len(payload)) + payload + bytes([checksum, END])
+    return frame
+
+def read_frame(ep_in, timeout_ms=3000):
+    """Read and return one complete frame from the device."""
+    buf = bytearray()
+    while True:
+        try:
+            chunk = ep_in.read(512, timeout=timeout_ms)
+            buf.extend(chunk)
+        except usb.core.USBTimeoutError:
+            return None
+        # Look for a complete frame
+        if BEGIN in buf:
+            start = buf.index(BEGIN)
+            buf = buf[start:]  # discard bytes before BEGIN
+            if len(buf) >= 6:  # BEGIN + 4-byte len + at least 1 byte
+                pkt_len = struct.unpack_from("<I", buf, 1)[0]
+                frame_len = 1 + 4 + pkt_len + 1 + 1  # BEGIN+len+payload+checksum+END
+                if len(buf) >= frame_len:
+                    return bytes(buf[:frame_len])
+
+print("=== Communication Test ===")
+print("Sending CMD_STOP...")
+try:
+    ep_out.write(make_frame(CMD_STOP, request_id=0), timeout=2000)
+except usb.core.USBError as e:
+    print(f"FAIL: write error: {e}")
+    sys.exit(1)
+
+# Read the reply to CMD_STOP
+frame = read_frame(ep_in, timeout_ms=2000)
+if frame:
+    hex_str = " ".join(f"{b:02x}" for b in frame)
+    print(f"  Reply: {hex_str}")
+else:
+    print("  (no reply to CMD_STOP - may be ok)")
+
+print("Sending CMD_START_SAMPLING (1ms interval)...")
+sampling_request_id = 1
+interval_bytes = struct.pack("<I", 1)  # 1ms
+try:
+    ep_out.write(make_frame(CMD_START_SAMPLING, args=interval_bytes, request_id=sampling_request_id), timeout=2000)
+except usb.core.USBError as e:
+    print(f"FAIL: write error: {e}")
+    sys.exit(1)
+
+print("Waiting for sampling data (up to 3s)...")
+got_sample = False
+for _ in range(10):
+    frame = read_frame(ep_in, timeout_ms=3000)
+    if frame is None:
+        break
+    hex_str = " ".join(f"{b:02x}" for b in frame)
+    print(f"  Frame ({len(frame)} bytes): {hex_str}")
+
+    # Try to parse a sample: payload starts at offset 5
+    # payload[0]=0x04, payload[1]=0, payload[2]=sampling_request_id, payload[3]=0
+    # then float32 voltage, float32 current, uint64 timestamp
+    if len(frame) >= 6:
+        pkt_len = struct.unpack_from("<I", frame, 1)[0]
+        payload = frame[5:5 + pkt_len]
+        if (len(payload) >= 20 and payload[0] == 0x04 and payload[1] == 0x00
+                and payload[2] == sampling_request_id and payload[3] == 0x00):
+            voltage = struct.unpack_from("<f", payload, 4)[0]
+            current = abs(struct.unpack_from("<f", payload, 8)[0])
+            power   = voltage * current
+            print(f"  PASS: sample decoded: {voltage:.4f}V  {current:.4f}A  {power:.4f}W")
+            got_sample = True
+            break
+
+# Send CMD_STOP to clean up
+try:
+    ep_out.write(make_frame(CMD_STOP, request_id=2), timeout=2000)
+except Exception:
+    pass
+usb.util.release_interface(target_dev, 0)
+
+print()
+if got_sample:
+    print("RESULT: PASS - power meter connected, accessible, and returning samples")
+else:
+    print("RESULT: UNCERTAIN - device found and opened, but no parseable sample received")
+    print("  The device may need something in USB pass-through to start sampling.")
     sys.exit(1)
 PYEOF
 

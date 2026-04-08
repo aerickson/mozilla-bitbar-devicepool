@@ -129,6 +129,25 @@ def main():
         print(f"ERROR: user_script dir not found: {user_script_dir}", file=sys.stderr)
         sys.exit(1)
 
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    report_path = f"lt_run_cmd_output_{timestamp}.md"
+    cmd_or_script = args.script if args.script else args.command
+    start_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"Report: {report_path}")
+
+    def write_report(partial_results):
+        formatted = run_cmd.format_results(partial_results, args.format)
+        n_ok = sum(1 for _, (_, s) in partial_results.items() if s == "ok")
+        with open(report_path, "w") as f:
+            f.write("# lt_run_cmd report\n\n")
+            f.write(f"**Date:** {start_time}\n\n")
+            f.write(f"**Command/script:** `{cmd_or_script}`\n\n")
+            f.write(f"**Devices targeted:** {len(udids)} ({n_ok}/{len(partial_results)} complete so far)\n\n")
+            f.write("## Results\n\n")
+            f.write("```\n")
+            f.write(formatted)
+            f.write("```\n")
+
     results = run_cmd.run_on_all_devices(
         udids=udids,
         command=args.command,
@@ -141,26 +160,20 @@ def main():
         max_retries=args.retries,
         retry_wait=args.retry_wait,
         start_delay=args.start_delay,
+        on_update=write_report,
     )
 
+    write_report(results)
     formatted = run_cmd.format_results(results, args.format)
     print(formatted)
+    print(f"\nReport: {report_path}")
 
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    report_path = f"lt_run_cmd_output_{timestamp}.md"
-    cmd_or_script = args.script if args.script else args.command
-    with open(report_path, "w") as f:
-        f.write(f"# lt_run_cmd report\n\n")
-        f.write(f"**Date:** {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-        f.write(f"**Command/script:** `{cmd_or_script}`\n\n")
-        f.write(f"**Devices targeted:** {len(udids)}\n\n")
-        f.write("## Results\n\n")
-        f.write("```\n")
-        f.write(formatted)
-        f.write("```\n")
-    print(f"\nReport written to: {report_path}")
-
-    failed = [udid for udid, (_, success) in results.items() if not success]
+    not_ok = [udid for udid, (_, status) in results.items() if status != "ok"]
+    timeouts = [udid for udid, (_, status) in results.items() if status == "queue_timeout"]
+    failed = [udid for udid, (_, status) in results.items() if status == "failed"]
+    if timeouts:
+        print(f"TIMED OUT ({len(timeouts)}): {', '.join(sorted(timeouts))}", file=sys.stderr)
     if failed:
-        print(f"FAILED devices ({len(failed)}): {', '.join(sorted(failed))}", file=sys.stderr)
+        print(f"FAILED ({len(failed)}): {', '.join(sorted(failed))}", file=sys.stderr)
+    if not_ok:
         sys.exit(1)

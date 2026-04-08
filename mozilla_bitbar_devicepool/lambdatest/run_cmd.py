@@ -136,15 +136,20 @@ def run_on_device(udid, command, project_root_dir, user_script_dir, timeout=1800
             output_text = _parse_stdout_markers(result.stdout)
             logging.info(f"run_on_device [{udid}]: stdout markers result: {output_text!r}")
 
-        success = result.returncode == 0
-        return (udid, output_text, success)
+        if result.returncode == 0:
+            status = "ok"
+        elif _is_queue_timeout(result.stdout + result.stderr):
+            status = "queue_timeout"
+        else:
+            status = "failed"
+        return (udid, output_text, status)
 
     except subprocess.TimeoutExpired:
         logging.error(f"run_on_device [{udid}]: timed out after {timeout}s")
-        return (udid, None, False)
+        return (udid, None, "queue_timeout")
     except Exception as e:
         logging.error(f"run_on_device [{udid}]: exception: {e}")
-        return (udid, None, False)
+        return (udid, None, "failed")
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
 
@@ -167,6 +172,21 @@ def _parse_stdout_markers(stdout):
     return None
 
 
+_QUEUE_TIMEOUT_PATTERNS = [
+    "queuetimeout",
+    "queue timeout",
+    "no device available",
+    "no devices available",
+    "device not available",
+    "waiting for device",
+]
+
+
+def _is_queue_timeout(text):
+    lower = text.lower()
+    return any(p in lower for p in _QUEUE_TIMEOUT_PATTERNS)
+
+
 def _run_batch(
     udids,
     command,
@@ -178,6 +198,7 @@ def _run_batch(
     script_path,
     label="",
     start_delay=5,
+    on_update=None,
 ):
     results = {}
     with ThreadPoolExecutor(max_workers=max_parallel) as executor:
@@ -189,13 +210,18 @@ def _run_batch(
                 run_on_device, udid, command, project_root_dir, user_script_dir, timeout, queue_timeout, script_path
             )
             futures[future] = udid
+        succeeded = 0
         with tqdm(total=len(futures), desc=label or "devices", unit="device", ncols=80) as bar:
             for future in as_completed(futures):
-                udid, output, success = future.result()
-                results[udid] = (output, success)
-                status = "OK" if success else "FAIL"
-                bar.set_postfix_str(f"{udid} [{status}]")
+                udid, output, status = future.result()
+                results[udid] = (output, status)
+                if status == "ok":
+                    succeeded += 1
+                bar_status = {"ok": "OK", "failed": "FAIL", "queue_timeout": "TIMEOUT"}.get(status, status)
+                bar.set_postfix_str(f"{succeeded}/{len(futures)} ok, {udid} [{bar_status}]")
                 bar.update(1)
+                if on_update:
+                    on_update(results)
     return results
 
 
@@ -211,6 +237,7 @@ def run_on_all_devices(
     max_retries=5,
     retry_wait=10,
     start_delay=1,
+    on_update=None,
 ):
     results = _run_batch(
         udids,
@@ -223,10 +250,11 @@ def run_on_all_devices(
         script_path,
         label=f"attempt 1/{max_retries + 1}",
         start_delay=start_delay,
+        on_update=on_update,
     )
 
     for attempt in range(1, max_retries + 1):
-        failed = [udid for udid, (_, success) in results.items() if not success]
+        failed = [udid for udid, (_, status) in results.items() if status != "ok"]
         if not failed:
             break
         logging.info(
@@ -244,6 +272,7 @@ def run_on_all_devices(
             script_path,
             label=f"attempt {attempt + 1}/{max_retries + 1}",
             start_delay=start_delay,
+            on_update=lambda partial: on_update({**results, **partial}) if on_update else None,
         )
         results.update(retry_results)
 
@@ -255,8 +284,8 @@ def format_results(results, output_format="text"):
         import json
 
         out = {}
-        for udid, (output, success) in sorted(results.items()):
-            out[udid] = {"output": output, "success": success}
+        for udid, (output, status) in sorted(results.items()):
+            out[udid] = {"output": output, "status": status}
         return json.dumps(out, indent=2)
 
     if output_format == "csv":
@@ -265,16 +294,17 @@ def format_results(results, output_format="text"):
 
         buf = io.StringIO()
         writer = csv.writer(buf)
-        writer.writerow(["udid", "success", "output"])
-        for udid, (output, success) in sorted(results.items()):
-            writer.writerow([udid, success, output or ""])
+        writer.writerow(["udid", "status", "output"])
+        for udid, (output, status) in sorted(results.items()):
+            writer.writerow([udid, status, output or ""])
         return buf.getvalue()
 
     # text (default)
+    _status_label = {"ok": "OK", "failed": "FAILED", "queue_timeout": "TIMEOUT"}
     lines = []
-    for udid, (output, success) in sorted(results.items()):
-        status = "OK" if success else "FAILED"
-        lines.append(f"=== {udid} [{status}] ===")
+    for udid, (output, status) in sorted(results.items()):
+        label = _status_label.get(status, status.upper())
+        lines.append(f"=== {udid} [{label}] ===")
         if output:
             lines.append(output)
         else:

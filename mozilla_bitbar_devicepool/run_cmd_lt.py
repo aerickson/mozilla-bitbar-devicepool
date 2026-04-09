@@ -130,7 +130,9 @@ def main():
         sys.exit(1)
 
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    report_path = f"lt_run_cmd_output_{timestamp}.md"
+    output_dir = "lt_run_cmd_output"
+    os.makedirs(output_dir, exist_ok=True)
+    report_path = os.path.join(output_dir, f"lt_run_cmd_output_{timestamp}.md")
     cmd_or_script = args.script if args.script else args.command
     start_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"Report: {report_path}")

@@ -10,6 +10,7 @@ import sys
 
 import mozilla_bitbar_devicepool.lambdatest.status as status
 import mozilla_bitbar_devicepool.lambdatest.util as util
+from mozilla_bitbar_devicepool.configuration_lt import ConfigurationLt
 from mozilla_bitbar_devicepool.lambdatest.api import get_devices, get_jobs
 from mozilla_bitbar_devicepool.taskcluster_client import TaskclusterClient
 
@@ -37,6 +38,14 @@ def job_distribution_report(verbose=True):
 
     lt_username = os.environ["LT_USERNAME"]
     lt_api_key = os.environ["LT_ACCESS_KEY"]
+
+    config_object = ConfigurationLt(ci_mode_envvars=True, quiet=True)
+    config_object.configure()
+    udid_to_group = {}
+    for group_name, devices in config_object.config.get("device_groups", {}).items():
+        if devices:
+            for udid in devices:
+                udid_to_group[udid] = group_name
 
     #
     si = status.Status(lt_username, lt_api_key)
@@ -130,7 +139,8 @@ def job_distribution_report(verbose=True):
         print("  All unseen devices are quarantined.")
     else:
         for device_id in sorted(not_seen_non_quarantined_devices):
-            print(f"  {device_id} (lt api: {udid_to_state.get(device_id, 'unknown')})")
+            group = udid_to_group.get(device_id, "unknown")
+            print(f"  {device_id} (lt api: {udid_to_state.get(device_id, 'unknown')}) ({group})")
 
     print("")
 

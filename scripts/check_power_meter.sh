@@ -76,10 +76,16 @@ echo ""
 # --- Main USB diagnostic ---
 echo "=== USB Device Enumeration and Test ==="
 $PYTHON -u - "${SERIAL}" 2>&1 <<'PYEOF'
-import sys
+import glob
 import os
+import shutil
+import signal
+import struct
+import subprocess
+import sys
+import time
 
-target_serial = sys.argv[1] if len(sys.argv) > 1 else ""
+target_serial = sys.argv[1]
 
 try:
     import usb.core
@@ -162,11 +168,6 @@ else:
           f"Bus {target_dev.bus:03d} Device {target_dev.address:03d}")
 print()
 
-import glob
-import signal
-import subprocess
-import time
-
 def dump_interfaces(dev):
     EP_TYPES = {0: "control", 1: "isochronous", 2: "bulk", 3: "interrupt"}
     EP_DIRS  = {usb.util.ENDPOINT_IN: "IN", usb.util.ENDPOINT_OUT: "OUT"}
@@ -208,6 +209,9 @@ def kill_device_holders(dev):
     """Kill any userspace processes holding the device file open. Returns killed PIDs."""
     dev_path = f"/dev/bus/usb/{dev.bus:03d}/{dev.address:03d}"
     print(f"  Checking who has {dev_path} open (lsof):")
+    if not shutil.which("lsof"):
+        print("    (lsof not available - cannot check)")
+        return []
     r = subprocess.run(["lsof", "-t", dev_path], capture_output=True, text=True)
     my_pid = os.getpid()
     pids = [int(p) for p in r.stdout.split() if p.strip().isdigit() and int(p) != my_pid]
@@ -314,7 +318,7 @@ for attempt in range(1, 3):
         print()
 
 if ep_in is None:
-    print("FAIL: could not open device after retrying")
+    print("FAIL: could not open device after 2 attempts")
     sys.exit(1)
 
 print(f"PASS: bulk endpoint IN  = 0x{ep_in.bEndpointAddress:02x}")
@@ -323,7 +327,6 @@ print()
 
 # Send CMD_STOP then CMD_START_SAMPLING and read one data packet
 # Frame format: [0xa5][len_le32][payload][xor_checksum][0x5a]
-import struct
 
 BEGIN = 0xa5
 END   = 0x5a
@@ -339,7 +342,7 @@ def make_frame(cmd, args=(), request_id=0):
     return frame
 
 def read_frame(ep_in, timeout_ms=3000):
-    """Read and return one complete frame from the device."""
+    """Read and return one complete frame from the device. Note: XOR checksum is not validated."""
     buf = bytearray()
     while True:
         try:
@@ -382,7 +385,7 @@ except usb.core.USBError as e:
     print(f"FAIL: write error: {e}")
     sys.exit(1)
 
-print("Waiting for sampling data (up to 3s)...")
+print("Waiting for sampling data (up to 30s, 10 attempts × 3s timeout each)...")
 got_sample = False
 for _ in range(10):
     frame = read_frame(ep_in, timeout_ms=3000)
@@ -400,7 +403,7 @@ for _ in range(10):
         if (len(payload) >= 20 and payload[0] == 0x04 and payload[1] == 0x00
                 and payload[2] == sampling_request_id and payload[3] == 0x00):
             voltage = struct.unpack_from("<f", payload, 4)[0]
-            current = abs(struct.unpack_from("<f", payload, 8)[0])
+            current = abs(struct.unpack_from("<f", payload, 8)[0])  # device may report negative current (discharge/backfeed)
             power   = voltage * current
             print(f"  PASS: sample decoded: {voltage:.4f}V  {current:.4f}A  {power:.4f}W")
             got_sample = True
@@ -411,7 +414,7 @@ try:
     ep_out.write(make_frame(CMD_STOP, request_id=2), timeout=2000)
 except Exception:
     pass
-usb.util.release_interface(target_dev, 0)
+usb.util.release_interface(target_dev, intf_num)
 
 print()
 if got_sample:

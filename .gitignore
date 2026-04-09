@@ -13,3 +13,5 @@ hyperexecute*
 
 *.log
 *.bak
+
+lt_run_cmd_output/

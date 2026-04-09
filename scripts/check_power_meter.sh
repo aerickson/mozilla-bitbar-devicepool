@@ -17,11 +17,17 @@
 
 set -o pipefail
 
+# Bare HyperExecute jobs don't run entrypoint.py, so USB_POWER_METER_SERIAL_NUMBER
+# is never set. Use PowerMeterSerial directly (same value, different env var name).
+SERIAL="${PowerMeterSerial:-${USB_POWER_METER_SERIAL_NUMBER:-}}"
+
 echo "=== AVHzy CT-3 Power Meter Diagnostic ==="
 echo "Date: $(date)"
 echo "Host: $(hostname)"
 echo "User: $(id)"
+echo "PowerMeterSerial: ${PowerMeterSerial:-(not set)}"
 echo "USB_POWER_METER_SERIAL_NUMBER: ${USB_POWER_METER_SERIAL_NUMBER:-(not set)}"
+echo "Using serial: ${SERIAL:-(none - will match by VID:PID only)}"
 echo ""
 
 # --- USB device enumeration ---
@@ -60,7 +66,7 @@ echo ""
 
 # --- Main USB diagnostic ---
 echo "=== USB Device Enumeration and Test ==="
-$PYTHON - "${USB_POWER_METER_SERIAL_NUMBER:-}" <<'PYEOF'
+$PYTHON - "${SERIAL}" <<'PYEOF'
 import sys
 import os
 
@@ -144,30 +150,48 @@ print()
 
 # Try to open and claim the device (same first step as usb-power-profiling)
 print("=== USB Access Test ===")
-print(f"Attempting to open device and claim interface...")
+print(f"Attempting to open device and find bulk endpoints...")
 try:
     target_dev.set_configuration()
     cfg = target_dev.get_active_configuration()
-    intf = cfg[(0, 0)]
 
-    # Find bulk IN and OUT endpoints (same as findBulkInOutEndPoints in usb-power-profiling)
-    ep_in = usb.util.find_descriptor(
-        intf,
-        custom_match=lambda e: (
-            usb.util.endpoint_direction(e.bEndpointAddress) == usb.util.ENDPOINT_IN
-            and usb.util.endpoint_type(e.bmAttributes) == usb.util.ENDPOINT_TYPE_BULK
+    # Dump all interfaces and endpoints so we can see the device layout
+    EP_TYPES = {0: "control", 1: "isochronous", 2: "bulk", 3: "interrupt"}
+    EP_DIRS  = {usb.util.ENDPOINT_IN: "IN", usb.util.ENDPOINT_OUT: "OUT"}
+    for intf in cfg:
+        print(f"  Interface {intf.bInterfaceNumber} alt={intf.bAlternateSetting} "
+              f"class=0x{intf.bInterfaceClass:02x}")
+        for ep in intf:
+            ep_type = EP_TYPES.get(usb.util.endpoint_type(ep.bmAttributes), "?")
+            ep_dir  = EP_DIRS.get(usb.util.endpoint_direction(ep.bEndpointAddress), "?")
+            print(f"    ep 0x{ep.bEndpointAddress:02x} {ep_dir} {ep_type} "
+                  f"maxPacket={ep.wMaxPacketSize}")
+    print()
+
+    # Search all interfaces for a pair of bulk IN + OUT endpoints
+    ep_in = ep_out = None
+    for intf in cfg:
+        candidate_in = usb.util.find_descriptor(
+            intf,
+            custom_match=lambda e: (
+                usb.util.endpoint_direction(e.bEndpointAddress) == usb.util.ENDPOINT_IN
+                and usb.util.endpoint_type(e.bmAttributes) == usb.util.ENDPOINT_TYPE_BULK
+            )
         )
-    )
-    ep_out = usb.util.find_descriptor(
-        intf,
-        custom_match=lambda e: (
-            usb.util.endpoint_direction(e.bEndpointAddress) == usb.util.ENDPOINT_OUT
-            and usb.util.endpoint_type(e.bmAttributes) == usb.util.ENDPOINT_TYPE_BULK
+        candidate_out = usb.util.find_descriptor(
+            intf,
+            custom_match=lambda e: (
+                usb.util.endpoint_direction(e.bEndpointAddress) == usb.util.ENDPOINT_OUT
+                and usb.util.endpoint_type(e.bmAttributes) == usb.util.ENDPOINT_TYPE_BULK
+            )
         )
-    )
+        if candidate_in and candidate_out:
+            ep_in, ep_out = candidate_in, candidate_out
+            print(f"Found bulk endpoints on interface {intf.bInterfaceNumber}")
+            break
 
     if ep_in is None or ep_out is None:
-        print(f"FAIL: bulk endpoints not found (in={ep_in}, out={ep_out})")
+        print(f"FAIL: no interface has both bulk IN and OUT endpoints")
         sys.exit(1)
 
     print(f"PASS: bulk endpoint IN  = 0x{ep_in.bEndpointAddress:02x}")

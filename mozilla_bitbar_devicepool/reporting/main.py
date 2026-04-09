@@ -138,9 +138,19 @@ def job_distribution_report(verbose=True):
     if not not_seen_non_quarantined_devices:
         print("  All unseen devices are quarantined.")
     else:
-        for device_id in sorted(not_seen_non_quarantined_devices):
+        # Group by config group, preserving config order; unknown devices go last
+        config_groups = list(config_object.config.get("device_groups", {}).keys())
+        by_group = {}
+        for device_id in not_seen_non_quarantined_devices:
             group = udid_to_group.get(device_id, "unknown")
-            print(f"  {device_id} (lt api: {udid_to_state.get(device_id, 'unknown')}) ({group})")
+            by_group.setdefault(group, []).append(device_id)
+        ordered_groups = [g for g in config_groups if g in by_group]
+        if "unknown" in by_group:
+            ordered_groups.append("unknown")
+        for group in ordered_groups:
+            print(f"  {group}")
+            for device_id in sorted(by_group[group]):
+                print(f"    {device_id} (lt api: {udid_to_state.get(device_id, 'unknown')})")
 
     print("")
 

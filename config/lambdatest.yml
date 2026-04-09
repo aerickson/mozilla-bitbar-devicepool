@@ -12,14 +12,6 @@ projects:
     disabled: false
     priority_group: set-a-priority-group
     priority: 1
-  a55-alpha:
-    # used for relops testing
-    # TODO: decomm this in favor of test-1, name is confusing given usage in cloud image context
-    TASKCLUSTER_CLIENT_ID: project/autophone/gecko-t-lambda-alpha-a55
-    TC_WORKER_TYPE: gecko-t-lambda-alpha-a55
-    USER_SCRIPTS_VERSION: v6-setup_sets_portrait
-    priority_group: a55
-    priority: 10
   a55-perf:
     TASKCLUSTER_CLIENT_ID: project/autophone/gecko-t-lambda-perf-a55
     TC_WORKER_TYPE: gecko-t-lambda-perf-a55
@@ -28,14 +20,22 @@ projects:
     TASKCLUSTER_CLIENT_ID: project/autophone/gecko-t-lambda-perf-p9
     TC_WORKER_TYPE: gecko-t-lambda-perf-p9
     priority_group: p9
+  a55-alpha:
+    # used for relops testing
+    # TODO: decomm this in favor of test-1, name is confusing given usage in cloud image context
+    TASKCLUSTER_CLIENT_ID: project/autophone/gecko-t-lambda-alpha-a55
+    TC_WORKER_TYPE: gecko-t-lambda-alpha-a55
+    USER_SCRIPTS_VERSION: v6-setup_sets_portrait
+    priority_group: a55
+    priority: 10
   stab:
     TASKCLUSTER_CLIENT_ID: project/autophone/gecko-t-lambda-stab
     TC_WORKER_TYPE: gecko-t-lambda-stab
   test-1:
-  #     SCRIPT_REPO_COMMIT: future_commit
+      # testing power meter fix
+      USER_SCRIPTS_VERSION: v7-cdc_acm_detach_for_power_meters
       TASKCLUSTER_CLIENT_ID: project/autophone/gecko-t-lambda-test-1
       TC_WORKER_TYPE: gecko-t-lambda-test-1
-  #     # override SCRIPT_REPO_COMMIT with a test commit
 device_groups:
   a55-perf:
     # devices with power meters
@@ -48,7 +48,6 @@ device_groups:
     R5CXC1AHV4M:  # 9/10/25: recabled and verified by jmaher
     R5CXC1ASA3P:  # 9/11/25: recabled and verified by jmaher
     R5CXC1AP2KT:  # 9/11/25: recabled and verified by jmaher
-    R5CXC1ASA2E:  # 9/11/25: recabled and verified by jmaher
     R5CXC1ARM0A:  # 9/11/25: recabled and verified by jmaher
     R5CXC1AMNFY:  # 9/15/25: recabled and verified by jmaher
     RZCX31FDGJE:  # 9/15/25: recabled and verified by jmaher
@@ -106,7 +105,9 @@ device_groups:
     47241FDAQ0016Y:
     47241FDAQ002C0:
   test-1:
-    R5CXC1ALFED:  # 9/18/25: recabled and verified by jmaher, 3/26/26: was in stab, stealing
+    R5CXC1ASA2E:  # 9/11/25: recabled and verified by jmaher, 4/9: 'bad' power meter, moving to test-1 for testing v7 userscripts
   stab:
+    # hosts with performance that is way out of spec
     R5CXC1ARELR:  # 10/1/25: was reseated, power cycled, and verified by jmaher
     RZCY10Y548K:  # 10/1/25: was reseated, power cycled, and verified by jmaher
+    R5CXC1ALFED:  # 9/18/25: recabled and verified by jmaher

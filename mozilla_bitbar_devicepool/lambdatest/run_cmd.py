@@ -254,7 +254,7 @@ def run_on_all_devices(
     )
 
     for attempt in range(1, max_retries + 1):
-        failed = [udid for udid, (_, status) in results.items() if status != "ok"]
+        failed = [udid for udid, (_, status) in results.items() if status == "queue_timeout"]
         if not failed:
             break
         logging.info(

@@ -1,0 +1,1 @@
+v7-cdc_acm_detach_for_power_meters

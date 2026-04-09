@@ -58,15 +58,24 @@ if [ -z "$PYTHON" ]; then
 fi
 echo "Python: $PYTHON ($($PYTHON --version))"
 
-$PYTHON -c "import usb.core" 2>/dev/null || {
-    echo "pyusb not installed, installing..."
-    pip3 install --quiet pyusb 2>&1 | tail -2
-}
+if ! $PYTHON -c "import usb.core" 2>/dev/null; then
+    echo "pyusb not installed, installing dependencies..."
+    # libusb-1.0-0 is required by pyusb at runtime
+    sudo apt-get install -y -q libusb-1.0-0 2>&1 | tail -3
+    pip3 install pyusb
+fi
+
+# Verify import actually works (pip may have failed)
+if ! $PYTHON -c "import usb.core" 2>&1; then
+    echo "ERROR: pyusb still not importable after install attempt - cannot continue"
+    exit 1
+fi
+echo "pyusb: OK"
 echo ""
 
 # --- Main USB diagnostic ---
 echo "=== USB Device Enumeration and Test ==="
-$PYTHON - "${SERIAL}" <<'PYEOF'
+$PYTHON -u - "${SERIAL}" 2>&1 <<'PYEOF'
 import sys
 import os
 
@@ -85,10 +94,15 @@ PRODUCT_IDS = [0xFFFE, 0xFFFF, 0x374B]
 
 # Find all matching devices
 all_avhzy = []
-for pid in PRODUCT_IDS:
-    found = usb.core.find(find_all=True, idVendor=VENDOR_ID, idProduct=pid)
-    if found:
-        all_avhzy.extend(found)
+try:
+    for pid in PRODUCT_IDS:
+        found = usb.core.find(find_all=True, idVendor=VENDOR_ID, idProduct=pid)
+        if found:
+            all_avhzy.extend(found)
+except usb.core.NoBackendError:
+    print("FAIL: pyusb NoBackendError - libusb could not be loaded")
+    print("  libusb-1.0-0 may be installed but not findable via ctypes")
+    sys.exit(1)
 
 print(f"Found {len(all_avhzy)} AVHzy/Shizuku device(s) (VID 0x0483):")
 if not all_avhzy:
@@ -148,60 +162,164 @@ else:
           f"Bus {target_dev.bus:03d} Device {target_dev.address:03d}")
 print()
 
-# Try to open and claim the device (same first step as usb-power-profiling)
-print("=== USB Access Test ===")
-print(f"Attempting to open device and find bulk endpoints...")
-try:
-    target_dev.set_configuration()
-    cfg = target_dev.get_active_configuration()
+import glob
+import signal
+import subprocess
+import time
 
-    # Dump all interfaces and endpoints so we can see the device layout
+def dump_interfaces(dev):
     EP_TYPES = {0: "control", 1: "isochronous", 2: "bulk", 3: "interrupt"}
     EP_DIRS  = {usb.util.ENDPOINT_IN: "IN", usb.util.ENDPOINT_OUT: "OUT"}
-    for intf in cfg:
-        print(f"  Interface {intf.bInterfaceNumber} alt={intf.bAlternateSetting} "
-              f"class=0x{intf.bInterfaceClass:02x}")
-        for ep in intf:
-            ep_type = EP_TYPES.get(usb.util.endpoint_type(ep.bmAttributes), "?")
-            ep_dir  = EP_DIRS.get(usb.util.endpoint_direction(ep.bEndpointAddress), "?")
-            print(f"    ep 0x{ep.bEndpointAddress:02x} {ep_dir} {ep_type} "
-                  f"maxPacket={ep.wMaxPacketSize}")
-    print()
+    try:
+        cfg = dev.get_active_configuration()
+        for intf in cfg:
+            print(f"  Interface {intf.bInterfaceNumber} alt={intf.bAlternateSetting} "
+                  f"class=0x{intf.bInterfaceClass:02x}")
+            for ep in intf:
+                ep_type = EP_TYPES.get(usb.util.endpoint_type(ep.bmAttributes), "?")
+                ep_dir  = EP_DIRS.get(usb.util.endpoint_direction(ep.bEndpointAddress), "?")
+                print(f"    ep 0x{ep.bEndpointAddress:02x} {ep_dir} {ep_type} "
+                      f"maxPacket={ep.wMaxPacketSize}")
+    except Exception as ex:
+        print(f"  (could not dump interfaces: {ex})")
 
-    # Search all interfaces for a pair of bulk IN + OUT endpoints
-    ep_in = ep_out = None
+def find_bulk_endpoints(dev):
+    cfg = dev.get_active_configuration()
     for intf in cfg:
-        candidate_in = usb.util.find_descriptor(
+        ep_in = usb.util.find_descriptor(
             intf,
             custom_match=lambda e: (
                 usb.util.endpoint_direction(e.bEndpointAddress) == usb.util.ENDPOINT_IN
                 and usb.util.endpoint_type(e.bmAttributes) == usb.util.ENDPOINT_TYPE_BULK
             )
         )
-        candidate_out = usb.util.find_descriptor(
+        ep_out = usb.util.find_descriptor(
             intf,
             custom_match=lambda e: (
                 usb.util.endpoint_direction(e.bEndpointAddress) == usb.util.ENDPOINT_OUT
                 and usb.util.endpoint_type(e.bmAttributes) == usb.util.ENDPOINT_TYPE_BULK
             )
         )
-        if candidate_in and candidate_out:
-            ep_in, ep_out = candidate_in, candidate_out
-            print(f"Found bulk endpoints on interface {intf.bInterfaceNumber}")
+        if ep_in and ep_out:
+            return ep_in, ep_out, intf.bInterfaceNumber
+    return None, None, None
+
+def kill_device_holders(dev):
+    """Kill any userspace processes holding the device file open. Returns killed PIDs."""
+    dev_path = f"/dev/bus/usb/{dev.bus:03d}/{dev.address:03d}"
+    print(f"  Checking who has {dev_path} open (lsof):")
+    r = subprocess.run(["lsof", "-t", dev_path], capture_output=True, text=True)
+    my_pid = os.getpid()
+    pids = [int(p) for p in r.stdout.split() if p.strip().isdigit() and int(p) != my_pid]
+    if not pids:
+        print("    (no userspace processes found)")
+        return []
+
+    # Ignore SIGHUP before killing: if PID is in our session and dies, we'd get
+    # SIGHUP and terminate silently without any further output.
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
+
+    killed = []
+    for pid in pids:
+        try:
+            name_r = subprocess.run(["ps", "-p", str(pid), "-o", "comm="],
+                                    capture_output=True, text=True)
+            name = name_r.stdout.strip() or "?"
+            print(f"    killing PID {pid} ({name})...")
+            os.kill(pid, signal.SIGKILL)
+            print(f"    killed PID {pid}")
+            killed.append(pid)
+        except ProcessLookupError:
+            print(f"    PID {pid} already gone")
+        except PermissionError:
+            print(f"    cannot kill PID {pid} (permission denied)")
+        except Exception as e:
+            print(f"    error killing PID {pid}: {e}")
+    return killed
+
+def show_tty_devices():
+    ttys = sorted(glob.glob("/dev/ttyUSB*") + glob.glob("/dev/ttyACM*"))
+    if ttys:
+        for tty in ttys:
+            print(f"    {tty}  {oct(os.stat(tty).st_mode)}")
+    else:
+        print("    (none)")
+
+def show_kernel_driver_status(dev):
+    try:
+        cfg = dev.get_active_configuration()
+        for intf in cfg:
+            n = intf.bInterfaceNumber
+            try:
+                active = dev.is_kernel_driver_active(n)
+                print(f"    interface {n}: kernel driver {'ATTACHED' if active else 'not attached'}")
+            except usb.core.USBError as ke:
+                print(f"    interface {n}: cannot check ({ke})")
+    except Exception as ce:
+        print(f"    (could not read configuration: {ce})")
+
+# Try to open and claim the device (same first step as usb-power-profiling)
+print("=== USB Access Test ===")
+ep_in = ep_out = None
+
+for attempt in range(1, 3):
+    print(f"Attempt {attempt}: opening device and finding bulk endpoints...")
+    try:
+        target_dev.set_configuration()
+        cfg = target_dev.get_active_configuration()
+        dump_interfaces(target_dev)
+        print()
+        ep_in, ep_out, intf_num = find_bulk_endpoints(target_dev)
+        if ep_in and ep_out:
+            print(f"Found bulk endpoints on interface {intf_num}")
             break
+        else:
+            print("FAIL: no interface has both bulk IN and OUT endpoints")
+            sys.exit(1)
+    except usb.core.USBError as e:
+        print(f"USB error: {e}")
+        print()
+        print("  Kernel driver status:")
+        show_kernel_driver_status(target_dev)
+        print()
+        print("  Serial ports (cdc_acm indicator):")
+        show_tty_devices()
+        print()
+        killed = kill_device_holders(target_dev)
 
-    if ep_in is None or ep_out is None:
-        print(f"FAIL: no interface has both bulk IN and OUT endpoints")
-        sys.exit(1)
+        # Detach cdc_acm (or any other kernel driver) from all interfaces
+        print("  Detaching kernel drivers...")
+        try:
+            cfg = target_dev.get_active_configuration()
+            for intf in cfg:
+                n = intf.bInterfaceNumber
+                try:
+                    if target_dev.is_kernel_driver_active(n):
+                        target_dev.detach_kernel_driver(n)
+                        print(f"    detached kernel driver from interface {n}")
+                    else:
+                        print(f"    interface {n}: no kernel driver to detach")
+                except usb.core.USBError as ke:
+                    print(f"    interface {n}: detach failed: {ke}")
+        except Exception as ex:
+            print(f"    (could not detach: {ex})")
 
-    print(f"PASS: bulk endpoint IN  = 0x{ep_in.bEndpointAddress:02x}")
-    print(f"PASS: bulk endpoint OUT = 0x{ep_out.bEndpointAddress:02x}")
-    print()
-except usb.core.USBError as e:
-    print(f"FAIL: USB error accessing device: {e}")
-    print("  Check: does the container have access to /dev/bus/usb/?")
-    print("  Check: is another process (usb-power-profiling) holding the device?")
+        if not killed and attempt == 2:
+            print()
+            print("FAIL: device still busy after detaching kernel drivers")
+            sys.exit(1)
+
+        print(f"  Waiting 2s for device to settle...")
+        time.sleep(2)
+        print()
+
+if ep_in is None:
+    print("FAIL: could not open device after retrying")
     sys.exit(1)
+
+print(f"PASS: bulk endpoint IN  = 0x{ep_in.bEndpointAddress:02x}")
+print(f"PASS: bulk endpoint OUT = 0x{ep_out.bEndpointAddress:02x}")
+print()
 
 # Send CMD_STOP then CMD_START_SAMPLING and read one data packet
 # Frame format: [0xa5][len_le32][payload][xor_checksum][0x5a]

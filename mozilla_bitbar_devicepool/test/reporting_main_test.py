@@ -107,6 +107,7 @@ def test_job_distribution_report_filters_device_counts_and_unseen_devices_by_poo
     main.job_distribution_report()
 
     output = capsys.readouterr().out
+    assert "Report filters: pool=a55-perf" in output
     assert "Device job counts (a55-perf pool):" in output
     assert "a55-1: 2 jobs, 1 failures" in output
     assert "test-device: 1 jobs, 0 failures" in output
@@ -166,6 +167,7 @@ def test_job_distribution_report_can_limit_counts_to_current_pool_members(monkey
     main.job_distribution_report()
 
     output = capsys.readouterr().out
+    assert "Report filters: pool=a55-perf; current members only" in output
     assert "Device job counts (current a55-perf pool members):" in output
     assert "a55-1: 1 jobs, 0 failures" in output
     assert "former-a55:" not in output
@@ -183,13 +185,22 @@ def test_write_device_job_counts_svg(tmp_path):
         pool="a55-perf",
         jobs_inspected=5000,
         jobs_matching_pool=1200,
+        current_members_only=True,
     )
 
     svg = output_path.read_text()
-    ET.fromstring(svg)
-    assert "Device job distribution — a55-perf pool" in svg
+    root = ET.fromstring(svg)
+    assert "Device job distribution — a55-perf pool (current members only)" in svg
     assert "1,200 a55-perf jobs from 5,000 recent jobs inspected" in svg
     assert "device-1" in svg
     assert "10 jobs, 2 failed" in svg
     assert main.SVG_SUCCESS_COLOR in svg
     assert main.SVG_FAILURE_COLOR in svg
+
+    namespace = {"svg": "http://www.w3.org/2000/svg"}
+    text_elements = root.findall(".//svg:text", namespace)
+    failed_legend = next(
+        element for element in text_elements if element.attrib.get("class") == "legend" and element.text == "failed"
+    )
+    tick_label = next(element for element in text_elements if element.attrib.get("class") == "tick")
+    assert float(tick_label.attrib["y"]) - float(failed_legend.attrib["y"]) >= 20

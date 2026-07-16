@@ -93,12 +93,13 @@ def write_device_job_counts_svg(
     pool=None,
     jobs_inspected=None,
     jobs_matching_pool=None,
+    current_members_only=False,
 ):
     output_path = Path(output_path)
     width = 1100
     label_width = 190
     chart_width = 700
-    top = 110
+    top = 130
     row_height = 30
     bottom = 55
     height = max(220, top + len(device_job_count) * row_height + bottom)
@@ -109,6 +110,8 @@ def write_device_job_counts_svg(
     title = "Device job distribution"
     if pool:
         title += f" — {pool} pool"
+    if current_members_only:
+        title += " (current members only)"
     if pool and jobs_matching_pool is not None and jobs_inspected is not None:
         subtitle = f"{jobs_matching_pool:,} {pool} jobs from {jobs_inspected:,} recent jobs inspected"
     else:
@@ -315,6 +318,11 @@ def job_distribution_report(verbose=True):
                 else:
                     device_failure_count[device_id] = 1
     print("")
+    if args.pool:
+        membership_filter = "; current members only" if args.current_members_only else ""
+        print(f"Report filters: pool={args.pool}{membership_filter}")
+        print("")
+
     print("Pool job counts (from job labels):")
     if args.pool:
         ordered_pools = [args.pool]
@@ -368,6 +376,7 @@ def job_distribution_report(verbose=True):
             pool=args.pool,
             jobs_inspected=jobs_inspected,
             jobs_matching_pool=jobs_counted_by_device,
+            current_members_only=args.current_members_only,
         )
         print(f"SVG report: {args.svg.resolve()}")
         print("")

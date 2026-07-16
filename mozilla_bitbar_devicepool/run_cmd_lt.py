@@ -67,6 +67,13 @@ def main():
     parser.add_argument(
         "--format", choices=["text", "json", "csv"], default="text", help="Output format (default: text)"
     )
+    parser.add_argument(
+        "--label",
+        action="append",
+        default=[],
+        metavar="LABEL",
+        help="Additional HyperExecute job label (repeatable)",
+    )
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
 
     args = parser.parse_args()
@@ -77,6 +84,8 @@ def main():
         parser.error("command and --script are mutually exclusive")
     if args.script and not os.path.isfile(args.script):
         parser.error(f"script file not found: {args.script}")
+    if any("," in label for label in args.label):
+        parser.error("labels must not contain commas; pass each label with a separate --label option")
 
     log_level = logging.DEBUG if args.verbose else logging.WARNING
     handler = _TqdmLoggingHandler()
@@ -118,6 +127,8 @@ def main():
         print(f"Script: {args.script}")
     else:
         print(f"Command: {args.command}")
+    if args.label:
+        print(f"Additional labels: {', '.join(args.label)}")
     print()
 
     # resolve paths
@@ -150,6 +161,8 @@ def main():
             f.write("# lt_run_cmd report\n\n")
             f.write(f"**Date:** {start_time}\n\n")
             f.write(f"**Command/script:** `{cmd_or_script}`\n\n")
+            if args.label:
+                f.write(f"**Additional labels:** {', '.join(args.label)}\n\n")
             f.write(f"**Devices targeted:** {len(udids)}{status_note}\n\n")
             f.write("## Results\n\n")
             f.write("```\n")
@@ -168,6 +181,7 @@ def main():
         max_retries=args.retries,
         retry_wait=args.retry_wait,
         start_delay=args.start_delay,
+        labels=args.label,
         on_update=write_report,
     )
 

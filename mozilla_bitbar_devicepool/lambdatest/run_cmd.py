@@ -4,6 +4,7 @@
 
 import logging
 import os
+import shlex
 import shutil
 import subprocess
 import time
@@ -59,7 +60,16 @@ framework:
     return config
 
 
-def run_on_device(udid, command, project_root_dir, user_script_dir, timeout=1800, queue_timeout=900, script_path=None):
+def run_on_device(
+    udid,
+    command,
+    project_root_dir,
+    user_script_dir,
+    timeout=1800,
+    queue_timeout=900,
+    script_path=None,
+    labels=None,
+):
     timestamp = time.time_ns()
     temp_dir = f"/tmp/mozilla-lt-run-cmd.{udid}.{timestamp}"
     artifacts_dir = os.path.join(temp_dir, "artifacts")
@@ -82,10 +92,10 @@ def run_on_device(udid, command, project_root_dir, user_script_dir, timeout=1800
             f.write(config)
 
         hyperexecute_path = os.path.join(project_root_dir, "hyperexecute")
-        labels_csv = f"run-cmd,{udid}"
+        labels_csv = ",".join(["run-cmd", udid, *(labels or [])])
         cmd = (
             f"{hyperexecute_path}"
-            f" --labels '{labels_csv}'"
+            f" --labels {shlex.quote(labels_csv)}"
             f" --exclude-external-binaries"
             f" --download-artifacts"
             f" --download-artifacts-path {artifacts_dir}"
@@ -196,6 +206,7 @@ def _run_batch(
     timeout,
     queue_timeout,
     script_path,
+    labels,
     label="",
     start_delay=5,
     on_update=None,
@@ -207,7 +218,15 @@ def _run_batch(
             if i > 0 and start_delay > 0:
                 time.sleep(start_delay)
             future = executor.submit(
-                run_on_device, udid, command, project_root_dir, user_script_dir, timeout, queue_timeout, script_path
+                run_on_device,
+                udid,
+                command,
+                project_root_dir,
+                user_script_dir,
+                timeout,
+                queue_timeout,
+                script_path,
+                labels,
             )
             futures[future] = udid
         succeeded = 0
@@ -237,6 +256,7 @@ def run_on_all_devices(
     max_retries=5,
     retry_wait=10,
     start_delay=1,
+    labels=None,
     on_update=None,
 ):
     results = _run_batch(
@@ -248,6 +268,7 @@ def run_on_all_devices(
         timeout,
         queue_timeout,
         script_path,
+        labels,
         label=f"attempt 1/{max_retries + 1}",
         start_delay=start_delay,
         on_update=on_update,
@@ -270,6 +291,7 @@ def run_on_all_devices(
             timeout,
             queue_timeout,
             script_path,
+            labels,
             label=f"attempt {attempt + 1}/{max_retries + 1}",
             start_delay=start_delay,
             on_update=lambda partial: on_update({**results, **partial}) if on_update else None,

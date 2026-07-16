@@ -1,7 +1,10 @@
-import pytest
-
 import mozilla_bitbar_devicepool.lambdatest.util as util
-from mozilla_bitbar_devicepool.lambdatest.util import array_key_search, get_device_from_job_labels, shorten_worker_type
+from mozilla_bitbar_devicepool.lambdatest.util import (
+    array_key_search,
+    get_device_from_job_labels,
+    get_pool_from_job_labels,
+    shorten_worker_type,
+)
 
 
 def test_shorten_worker_type_removes_prefix():
@@ -37,6 +40,21 @@ def test_get_device_from_job_labels():
     assert get_device_from_job_labels([]) is None
     assert get_device_from_job_labels(["tcdp"]) is None
     assert get_device_from_job_labels(["device-123", "tcdp"]) == "device-123"
+
+
+def test_get_device_from_job_labels_with_known_devices():
+    known_devices = {"RZCY107MCLV"}
+
+    assert get_device_from_job_labels(["tcdp", "test-1", "RZCY107MCLV"], known_devices) == "RZCY107MCLV"
+    assert get_device_from_job_labels(["tcdp", "test-1", "unknown-device"], known_devices) is None
+
+
+def test_get_pool_from_job_labels():
+    pools = {"a55-perf", "test-1"}
+
+    assert get_pool_from_job_labels(["tcdp", "test-1", "RZCY107MCLV"], pools) == "test-1"
+    assert get_pool_from_job_labels(["tcdp", "a55-perf", "RZCY107MCLV"], pools) == "a55-perf"
+    assert get_pool_from_job_labels(["tcdp", "RZCY107MCLV"], pools) == "unknown"
 
 
 # test string_list_to_list()

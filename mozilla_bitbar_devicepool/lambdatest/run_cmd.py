@@ -2,6 +2,7 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this file,
 # You can obtain one at http://mozilla.org/MPL/2.0/.
 
+import json
 import logging
 import os
 import shlex
@@ -9,11 +10,40 @@ import shutil
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from glob import glob
 
 from tqdm import tqdm
 
 
-def generate_config(udid, command, queue_timeout=900):
+def validate_artifact_path(path):
+    """Return a safe relative artifact path or glob for the HE workspace."""
+    if not path or os.path.isabs(path):
+        raise ValueError("artifact paths must be non-empty relative paths")
+    parts = path.replace("\\", "/").split("/")
+    if any(part in ("", "..") for part in parts):
+        raise ValueError(f"unsafe artifact path: {path!r}")
+    return "/".join(parts)
+
+
+def artifact_directory(artifacts_root, udid):
+    """Return the persistent artifact directory for a device serial."""
+    if not udid or udid in (".", "..") or any(char not in "-_." and not char.isalnum() for char in udid):
+        raise ValueError(f"unsafe device serial for artifact directory: {udid!r}")
+    return os.path.join(artifacts_root, udid)
+
+
+def missing_required_artifacts(artifacts_dir, required_artifact_globs):
+    return [
+        artifact_glob
+        for artifact_glob in required_artifact_globs or []
+        # HyperExecute nests each downloaded payload below its artifact name and
+        # attempt number (for example, extra-artifact-1/1/<payload>). Search
+        # beneath the device directory rather than assuming a flat download.
+        if not glob(os.path.join(artifacts_dir, "**", artifact_glob), recursive=True)
+    ]
+
+
+def generate_config(udid, command, queue_timeout=900, artifact_paths=None):
     fixed_ip_line = f'fixedIP: "{udid}"'
     config = f"""version: "0.2"
 
@@ -39,6 +69,13 @@ uploadArtifacts:
   - name: run-cmd-output
     path:
       - output.txt
+"""
+    for index, artifact_path in enumerate(artifact_paths or [], start=1):
+        config += f"""  - name: extra-artifact-{index}
+    path:
+      - {json.dumps(artifact_path)}
+"""
+    config += f"""
 
 framework:
   name: raw
@@ -69,16 +106,21 @@ def run_on_device(
     queue_timeout=900,
     script_path=None,
     labels=None,
+    artifacts_root=None,
+    artifact_paths=None,
+    required_artifact_globs=None,
 ):
     timestamp = time.time_ns()
     temp_dir = f"/tmp/mozilla-lt-run-cmd.{udid}.{timestamp}"
-    artifacts_dir = os.path.join(temp_dir, "artifacts")
+    artifacts_dir = artifact_directory(artifacts_root, udid) if artifacts_root else os.path.join(temp_dir, "artifacts")
     config_path = os.path.join(temp_dir, "hyperexecute.yaml")
 
     try:
         shutil.rmtree(temp_dir, ignore_errors=True)
         os.makedirs(temp_dir, exist_ok=True)
         os.makedirs(artifacts_dir, exist_ok=True)
+        if artifacts_root:
+            logging.warning(f"run_on_device [{udid}]: preserving artifacts at {artifacts_dir}")
 
         shutil.copytree(user_script_dir, os.path.join(temp_dir, "user_script"))
 
@@ -87,7 +129,7 @@ def run_on_device(
             shutil.copy2(script_path, dest)
             os.chmod(dest, 0o755)
 
-        config = generate_config(udid, command, queue_timeout=queue_timeout)
+        config = generate_config(udid, command, queue_timeout=queue_timeout, artifact_paths=artifact_paths)
         with open(config_path, "w") as f:
             f.write(config)
 
@@ -98,7 +140,7 @@ def run_on_device(
             f" --labels {shlex.quote(labels_csv)}"
             f" --exclude-external-binaries"
             f" --download-artifacts"
-            f" --download-artifacts-path {artifacts_dir}"
+            f" --download-artifacts-path {shlex.quote(artifacts_dir)}"
             f" --force-clean-artifacts"
             f" -i {config_path}"
         )
@@ -152,6 +194,12 @@ def run_on_device(
             status = "queue_timeout"
         else:
             status = "failed"
+        missing_globs = missing_required_artifacts(artifacts_dir, required_artifact_globs)
+        if missing_globs:
+            status = "failed"
+            logging.error(
+                f"run_on_device [{udid}]: missing required artifact(s) in {artifacts_dir}: {', '.join(missing_globs)}"
+            )
         return (udid, output_text, status)
 
     except subprocess.TimeoutExpired:
@@ -207,6 +255,9 @@ def _run_batch(
     queue_timeout,
     script_path,
     labels,
+    artifacts_root,
+    artifact_paths,
+    required_artifact_globs,
     label="",
     start_delay=5,
     on_update=None,
@@ -227,6 +278,9 @@ def _run_batch(
                 queue_timeout,
                 script_path,
                 labels,
+                artifacts_root,
+                artifact_paths,
+                required_artifact_globs,
             )
             futures[future] = udid
         succeeded = 0
@@ -257,6 +311,9 @@ def run_on_all_devices(
     retry_wait=10,
     start_delay=1,
     labels=None,
+    artifacts_root=None,
+    artifact_paths=None,
+    required_artifact_globs=None,
     on_update=None,
 ):
     results = _run_batch(
@@ -269,6 +326,9 @@ def run_on_all_devices(
         queue_timeout,
         script_path,
         labels,
+        artifacts_root,
+        artifact_paths,
+        required_artifact_globs,
         label=f"attempt 1/{max_retries + 1}",
         start_delay=start_delay,
         on_update=on_update,
@@ -292,6 +352,9 @@ def run_on_all_devices(
             queue_timeout,
             script_path,
             labels,
+            artifacts_root,
+            artifact_paths,
+            required_artifact_globs,
             label=f"attempt {attempt + 1}/{max_retries + 1}",
             start_delay=start_delay,
             on_update=lambda partial: on_update({**results, **partial}) if on_update else None,

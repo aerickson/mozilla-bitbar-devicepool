@@ -1,5 +1,19 @@
 # mld: mozilla-lambdatest-devicepool
 
+## Check private-cloud device availability
+
+Use `lt_device_availability` with one or more LambdaTest device UDIDs or exact
+phone model names. By default it prints the current API status once. Add
+`--wait` to poll until every matched device reports `active`.
+
+```shell
+poetry run lt_device_availability RZCXC19G1DM
+poetry run lt_device_availability RZCXC19G1DM RZCXC19G1DN --wait --interval 15
+```
+
+When a phone model name is supplied, every matching physical device must be
+active before `--wait` exits.
+
 Detects pending Taskcluster jobs and starts tasks at Lambdatest to handle them.
 
 Lambdatest job launching is done via their Hyperexecute CLI tool (that handles the API requests).

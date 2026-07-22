@@ -1,8 +1,10 @@
 import os
+import sys
 from unittest.mock import patch
 
 import pytest
 
+from mozilla_bitbar_devicepool.lambdatest import status as status_module
 from mozilla_bitbar_devicepool.lambdatest.status import Status
 
 
@@ -219,6 +221,50 @@ class TestStatus:
         # Test with a non-existent state
         result = status_instance.get_device_state_count("Galaxy A55 5G-14", "offline")
         assert result == 0
+
+    @patch("mozilla_bitbar_devicepool.lambdatest.status.get_jobs")
+    @patch("mozilla_bitbar_devicepool.lambdatest.status.get_devices")
+    def test_get_busy_devices_without_running_jobs(self, mock_get_devices, mock_get_jobs, status_instance):
+        mock_get_devices.return_value = {
+            "data": {
+                "private_cloud_devices": [
+                    {"name": "Galaxy A55 5G", "udid": "busy-with-job", "status": "busy"},
+                    {"name": "Galaxy A55 5G", "udid": "stuck-device", "status": "busy"},
+                    {"name": "Galaxy A55 5G", "udid": "available-device", "status": "active"},
+                ]
+            }
+        }
+        mock_get_jobs.return_value = {
+            "data": [
+                {"job_label": '["tcdp", "pool", "busy-with-job"]'},
+                {"job_label": '["tcdp", "pool", "available-device"]'},
+            ]
+        }
+
+        result = status_instance.get_busy_devices_without_running_jobs(jobs=25)
+
+        assert result == [{"udid": "stuck-device", "device_type": "Galaxy A55 5G"}]
+        mock_get_jobs.assert_called_once_with("test_user", "test_key", jobs=25, status="running")
+
+    def test_lt_stuck_device_report(self, monkeypatch, capsys):
+        class FakeStatus:
+            def __init__(self, username, api_key):
+                assert (username, api_key) == ("test_user", "test_key")
+
+            def get_busy_devices_without_running_jobs(self, jobs):
+                assert jobs == 25
+                return [{"udid": "stuck-device", "device_type": "Galaxy A55 5G"}]
+
+        monkeypatch.setenv("LT_USERNAME", "test_user")
+        monkeypatch.setenv("LT_ACCESS_KEY", "test_key")
+        monkeypatch.setattr(sys, "argv", ["lt_stuck_device_report", "--jobs", "25"])
+        monkeypatch.setattr(status_module, "Status", FakeStatus)
+
+        status_module.lt_stuck_device_report()
+
+        output = capsys.readouterr().out
+        assert "Stuck LambdaTest devices (1):" in output
+        assert "stuck-device (Galaxy A55 5G)" in output
 
     @patch("mozilla_bitbar_devicepool.lambdatest.status.get_devices")
     def test_empty_response(self, mock_get_devices, status_instance):

@@ -11,6 +11,8 @@ import sys
 import mozilla_bitbar_devicepool.lambdatest.util as util
 from mozilla_bitbar_devicepool.lambdatest.api import get_devices, get_jobs
 
+RUNNING_JOB_STATUS = "running"
+
 # idea: uses api data to build a status/state
 #   - a presentation layer for data from api.py
 
@@ -221,6 +223,38 @@ class Status:
                     result_int += 1
         return result_int
 
+    def get_busy_devices_without_running_jobs(self, jobs=100):
+        """Return busy devices that are not labeled by a running HyperExecute job.
+
+        LambdaTest's device API and the HyperExecute jobs API are separate views
+        of the service.  A device reported as ``busy`` with no matching running
+        job is a candidate for a stale LambdaTest allocation.
+        """
+        device_list = self.get_device_list()
+        devices_by_udid = {
+            udid: device_type
+            for device_type, devices in device_list.items()
+            for udid, state in devices.items()
+            if state == "busy"
+        }
+        if not devices_by_udid:
+            return []
+
+        job_result = get_jobs(
+            self.lt_username,
+            self.lt_api_key,
+            jobs=jobs,
+            status=RUNNING_JOB_STATUS,
+        )
+        running_jobs = (job_result or {}).get("data", [])
+        busy_udids = set(devices_by_udid)
+        running_udids = {
+            util.get_device_from_job_labels(util.string_list_to_list(job.get("job_label")), known_device_ids=busy_udids)
+            for job in running_jobs
+        }
+        unmatched_udids = busy_udids - running_udids
+        return [{"udid": udid, "device_type": devices_by_udid[udid]} for udid in sorted(unmatched_udids)]
+
 
 def lt_status_main():
     import os
@@ -269,6 +303,32 @@ def lt_status_main():
         print("  Busy device UDIDs:")
         for udid in busy_udids:
             print(f"    - {udid}")
+
+
+def lt_stuck_device_report():
+    """Report LambdaTest devices allocated without a matching running job."""
+    parser = argparse.ArgumentParser(
+        description="Find LambdaTest devices marked busy without a matching running HyperExecute job."
+    )
+    parser.add_argument(
+        "--jobs",
+        "-j",
+        type=int,
+        default=100,
+        help="Maximum running jobs to inspect (default: 100)",
+    )
+    args = parser.parse_args()
+
+    status = Status(os.environ["LT_USERNAME"], os.environ["LT_ACCESS_KEY"])
+    stuck_devices = status.get_busy_devices_without_running_jobs(jobs=args.jobs)
+    if not stuck_devices:
+        print("No stuck LambdaTest devices found.")
+        return
+
+    print(f"Stuck LambdaTest devices ({len(stuck_devices)}):")
+    print("  These are busy in the device API but have no matching running HyperExecute job.")
+    for device in stuck_devices:
+        print(f"  - {device['udid']} ({device['device_type']})")
 
 
 # TODO: idea: report that gets percentage of failing/total jobs

@@ -3,16 +3,20 @@
 ## Check private-cloud device availability
 
 Use `lt_device_availability` with one or more LambdaTest device UDIDs or exact
-phone model names. By default it prints the current API status once. Add
-`--wait` to poll until every matched device reports `active`.
+phone model names. By default it opens an interactive dashboard with one row
+per device, the update interval, next API check, elapsed wait time, and active
+device count. Press `q` to quit. Add `--wait` to exit automatically once every
+matched device reports `active`.
 
 ```shell
 poetry run lt_device_availability RZCXC19G1DM
 poetry run lt_device_availability RZCXC19G1DM RZCXC19G1DN --wait --interval 15
+poetry run lt_device_availability RZCXC19G1DM --no-tui
 ```
 
 When a phone model name is supplied, every matching physical device must be
-active before `--wait` exits.
+active before `--wait` exits. `--no-tui` (and non-interactive terminals) emits
+one compact status line for each API refresh instead.
 
 Detects pending Taskcluster jobs and starts tasks at Lambdatest to handle them.
 

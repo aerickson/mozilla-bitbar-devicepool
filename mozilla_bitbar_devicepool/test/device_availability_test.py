@@ -45,24 +45,34 @@ def test_get_requested_devices_rejects_missing_identifier(mock_get_devices, devi
         device_availability.get_requested_devices(["MISSING"], "user", "key")
 
 
-def test_print_device_statuses(capsys):
-    all_available = device_availability.print_device_statuses(
+def test_format_status_line():
+    status_line = device_availability.format_status_line(
         [
             {"udid": "one", "name": "Phone One", "status": "active"},
             {"udid": "two", "name": "Phone Two", "status": "busy"},
-        ]
+        ],
+        device_availability.datetime.datetime(2026, 7, 22, 12, 0, 0),
+        65,
+        15,
     )
 
-    assert capsys.readouterr().out == "one\tPhone One\tactive\ntwo\tPhone Two\tbusy\n"
-    assert not all_available
+    assert status_line == "12:00:00 | waiting 01:05 | next 12:00:15 | active 1/2 | one=active, two=busy"
+
+
+def test_status_attributes():
+    colors = {"active": "green", "busy": "yellow", "error": "red"}
+
+    assert device_availability.status_attributes({"status": "active"}, colors) == "green"
+    assert device_availability.status_attributes({"status": "busy"}, colors) == "yellow"
+    assert device_availability.status_attributes({"status": "faulty"}, colors) == "red"
 
 
 @patch.dict("os.environ", {"LT_USERNAME": "user", "LT_ACCESS_KEY": "key"})
 @patch("mozilla_bitbar_devicepool.lambdatest.device_availability.get_requested_devices")
-def test_main_status_mode_exits_after_one_check(mock_get_requested_devices):
+def test_main_non_tui_status_mode_exits_after_one_check(mock_get_requested_devices):
     mock_get_requested_devices.return_value = [{"udid": "one", "name": "Phone", "status": "busy"}]
 
-    assert device_availability.main(["one"]) == 0
+    assert device_availability.main(["one", "--no-tui"]) == 0
     mock_get_requested_devices.assert_called_once_with(["one"], "user", "key")
 
 
@@ -75,6 +85,14 @@ def test_main_waits_until_every_device_is_active(mock_get_requested_devices, moc
         [{"udid": "one", "name": "Phone", "status": "active"}],
     ]
 
-    assert device_availability.main(["one", "--wait", "--interval", "2"]) == 0
+    assert device_availability.main(["one", "--no-tui", "--wait", "--interval", "2"]) == 0
     assert mock_get_requested_devices.call_count == 2
     mock_sleep.assert_called_once_with(2)
+
+
+@patch("mozilla_bitbar_devicepool.lambdatest.device_availability.time.sleep", side_effect=KeyboardInterrupt)
+def test_non_tui_wait_reports_interrupt(mock_sleep):
+    with pytest.raises(device_availability.WaitInterrupted) as error:
+        device_availability.run_non_tui(lambda: [{"udid": "one", "status": "busy"}], 2, wait=True)
+
+    assert error.value.waiting_seconds >= 0

@@ -89,6 +89,47 @@ def test_run_on_device_fails_when_required_artifact_is_missing(tmp_path, monkeyp
     assert result == ("SERIAL", "command output", "failed")
 
 
+def test_run_batch_progress_identifies_the_latest_completed_device(monkeypatch):
+    postfixes = []
+
+    class FakeProgressBar:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            pass
+
+        def set_postfix_str(self, value):
+            postfixes.append(value)
+
+        def update(self, _count):
+            pass
+
+    monkeypatch.setattr(run_cmd, "tqdm", lambda **_kwargs: FakeProgressBar())
+    monkeypatch.setattr(
+        run_cmd,
+        "run_on_device",
+        lambda udid, *_args: (udid, "", "ok"),
+    )
+
+    run_cmd._run_batch(
+        ["SERIAL"],
+        "echo hello",
+        ".",
+        ".",
+        max_parallel=1,
+        timeout=1,
+        queue_timeout=1,
+        script_path=None,
+        labels=[],
+        artifacts_root=None,
+        artifact_paths=[],
+        required_artifact_globs=[],
+    )
+
+    assert postfixes == ["1/1 completed (latest: SERIAL [OK])"]
+
+
 def test_main_rejects_duplicate_devices_before_launch(monkeypatch, capsys):
     class FakeConfiguration:
         def __init__(self, lightweight):

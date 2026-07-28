@@ -284,7 +284,7 @@ def _run_batch(
             )
             futures[future] = udid
         succeeded = 0
-        with tqdm(total=len(futures), desc=label or "devices", unit="device", ncols=80) as bar:
+        with tqdm(total=len(futures), desc=label or "devices", unit="device", dynamic_ncols=True) as bar:
             for future in as_completed(futures):
                 udid, output, status = future.result()
                 results[udid] = (output, status)

@@ -5,6 +5,7 @@
 import json
 import logging
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -13,6 +14,23 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from glob import glob
 
 from tqdm import tqdm
+
+_ENVIRONMENT_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def parse_environment(assignments):
+    """Parse NAME=VALUE assignments for the device-side script environment."""
+    environment = {}
+    for assignment in assignments or []:
+        name, separator, value = assignment.partition("=")
+        if not separator or not _ENVIRONMENT_NAME.fullmatch(name):
+            raise ValueError(f"invalid environment variable assignment: {assignment!r}; expected NAME=VALUE")
+        if name == "CMD_TO_RUN":
+            raise ValueError("CMD_TO_RUN is reserved by lt_run_cmd")
+        if name in environment:
+            raise ValueError(f"duplicate environment variable: {name}")
+        environment[name] = value
+    return environment
 
 
 def validate_artifact_path(path):
@@ -43,8 +61,9 @@ def missing_required_artifacts(artifacts_dir, required_artifact_globs):
     ]
 
 
-def generate_config(udid, command, queue_timeout=900, artifact_paths=None):
+def generate_config(udid, command, queue_timeout=900, artifact_paths=None, environment=None):
     fixed_ip_line = f'fixedIP: "{udid}"'
+    environment_lines = "".join(f"  {name}: {json.dumps(value)}\n" for name, value in (environment or {}).items())
     config = f"""version: "0.2"
 
 autosplit: true
@@ -58,6 +77,7 @@ testDiscovery:
 
 env:
   CMD_TO_RUN: {command!r}
+{environment_lines}
 
 testRunnerCommand: bash ./user_script/run_cmd_on_device.sh
 
@@ -109,6 +129,7 @@ def run_on_device(
     artifacts_root=None,
     artifact_paths=None,
     required_artifact_globs=None,
+    environment=None,
 ):
     timestamp = time.time_ns()
     temp_dir = f"/tmp/mozilla-lt-run-cmd.{udid}.{timestamp}"
@@ -129,7 +150,13 @@ def run_on_device(
             shutil.copy2(script_path, dest)
             os.chmod(dest, 0o755)
 
-        config = generate_config(udid, command, queue_timeout=queue_timeout, artifact_paths=artifact_paths)
+        config = generate_config(
+            udid,
+            command,
+            queue_timeout=queue_timeout,
+            artifact_paths=artifact_paths,
+            environment=environment,
+        )
         with open(config_path, "w") as f:
             f.write(config)
 
@@ -258,6 +285,7 @@ def _run_batch(
     artifacts_root,
     artifact_paths,
     required_artifact_globs,
+    environment,
     label="",
     start_delay=5,
     on_update=None,
@@ -281,6 +309,7 @@ def _run_batch(
                 artifacts_root,
                 artifact_paths,
                 required_artifact_globs,
+                environment,
             )
             futures[future] = udid
         succeeded = 0
@@ -314,6 +343,7 @@ def run_on_all_devices(
     artifacts_root=None,
     artifact_paths=None,
     required_artifact_globs=None,
+    environment=None,
     on_update=None,
 ):
     results = _run_batch(
@@ -329,6 +359,7 @@ def run_on_all_devices(
         artifacts_root,
         artifact_paths,
         required_artifact_globs,
+        environment,
         label=f"attempt 1/{max_retries + 1}",
         start_delay=start_delay,
         on_update=on_update,
@@ -355,6 +386,7 @@ def run_on_all_devices(
             artifacts_root,
             artifact_paths,
             required_artifact_globs,
+            environment,
             label=f"attempt {attempt + 1}/{max_retries + 1}",
             start_delay=start_delay,
             on_update=lambda partial: on_update({**results, **partial}) if on_update else None,

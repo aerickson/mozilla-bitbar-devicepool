@@ -20,6 +20,28 @@ def test_generate_config_includes_opt_in_artifact_paths():
     assert '- "fleetbench-artifacts/**"' in config
 
 
+def test_generate_config_includes_script_environment():
+    config = run_cmd.generate_config(
+        "SERIAL",
+        "echo hello",
+        environment={"RUN_LABEL": "nightly", "EMPTY": ""},
+    )
+
+    assert '  RUN_LABEL: "nightly"' in config
+    assert '  EMPTY: ""' in config
+
+
+def test_parse_environment_accepts_values_and_rejects_invalid_names():
+    assert run_cmd.parse_environment(["RUN_LABEL=nightly", "EMPTY="]) == {"RUN_LABEL": "nightly", "EMPTY": ""}
+
+    with pytest.raises(ValueError, match="expected NAME=VALUE"):
+        run_cmd.parse_environment(["NOT_AN_ASSIGNMENT"])
+    with pytest.raises(ValueError, match="CMD_TO_RUN is reserved"):
+        run_cmd.parse_environment(["CMD_TO_RUN=echo nope"])
+    with pytest.raises(ValueError, match="duplicate environment variable: RUN_LABEL"):
+        run_cmd.parse_environment(["RUN_LABEL=first", "RUN_LABEL=second"])
+
+
 @pytest.mark.parametrize("path", ["", "/tmp/output", "../output", "output/../secret", "output//nested"])
 def test_validate_artifact_path_rejects_unsafe_paths(path):
     with pytest.raises(ValueError):
@@ -130,6 +152,7 @@ def test_run_batch_progress_identifies_the_latest_completed_device(monkeypatch):
         artifacts_root=None,
         artifact_paths=[],
         required_artifact_globs=[],
+        environment={},
     )
 
     assert postfixes == ["1/1 completed (latest: SERIAL [OK])"]

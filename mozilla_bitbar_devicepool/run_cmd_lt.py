@@ -75,6 +75,13 @@ def main():
         help="Additional HyperExecute job label (repeatable)",
     )
     parser.add_argument(
+        "--env",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help="Environment variable to pass to the device-side script (repeatable)",
+    )
+    parser.add_argument(
         "--artifacts-dir",
         metavar="DIR",
         help="Directory for downloaded artifacts (default: <run directory>/artifacts)",
@@ -108,6 +115,7 @@ def main():
     try:
         artifact_paths = [run_cmd.validate_artifact_path(path) for path in args.artifact_path]
         required_artifact_globs = [run_cmd.validate_artifact_path(path) for path in args.require_artifact_glob]
+        environment = run_cmd.parse_environment(args.env)
     except ValueError as exc:
         parser.error(str(exc))
 
@@ -236,6 +244,7 @@ def main():
         artifacts_root=artifacts_root,
         artifact_paths=artifact_paths,
         required_artifact_globs=required_artifact_globs,
+        environment=environment,
         on_update=write_report,
     )
 

@@ -18,6 +18,21 @@ When a phone model name is supplied, every matching physical device must be
 active before `--wait` exits. `--no-tui` (and non-interactive terminals) emits
 one compact status line for each API refresh instead.
 
+## Pass environment variables to `lt_run_cmd` scripts
+
+Use repeatable `--env NAME=VALUE` arguments to make values available to a
+local script passed with `lt_run_cmd --script`. The script can read them as
+ordinary environment variables alongside `DEVICE_SERIAL`.
+
+```shell
+poetry run lt_run_cmd --script ./collect.sh --device RZCXC19G1DM \
+  --env RUN_LABEL=nightly --env RETRIES=3
+```
+
+Variable names must be shell-style names and cannot be repeated. Avoid placing
+secrets directly on the command line, where they may be retained in shell
+history or process listings.
+
 Detects pending Taskcluster jobs and starts tasks at Lambdatest to handle them.
 
 Lambdatest job launching is done via their Hyperexecute CLI tool (that handles the API requests).

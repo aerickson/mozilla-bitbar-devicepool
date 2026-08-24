@@ -19,6 +19,18 @@ def test_get_quarantined_worker_names(client):
     assert result == ["worker-1", "worker-2", "worker-3"]
 
 
+def test_get_workers_collects_paginated_results(client):
+    class FakeWorkerManager:
+        def listWorkers(self, provisioner, worker_type, paginationHandler):
+            assert (provisioner, worker_type) == ("prov", "type")
+            paginationHandler({"workers": [{"workerId": "worker-1"}]})
+            paginationHandler({"workers": [{"workerId": "worker-2"}]})
+
+    client.tc_wm = FakeWorkerManager()
+
+    assert client.get_workers("prov", "type") == [{"workerId": "worker-1"}, {"workerId": "worker-2"}]
+
+
 def test_get_quarantined_workers(client):
     # Injecting results directly to avoid api call mocking
     results = {

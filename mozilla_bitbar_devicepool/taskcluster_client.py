@@ -68,6 +68,22 @@ class TaskclusterClient:
         # pprint.pprint(natsorted(return_arr))
         return natsorted(return_arr)
 
+    def get_workers(self, provisioner, worker_type):
+        """Return every active worker for a worker type.
+
+        Worker Manager's ``listWorkers`` response is paginated.  Passing a
+        pagination handler lets the Taskcluster client follow continuation
+        tokens while keeping the rest of this package independent of the API
+        response shape.
+        """
+        workers = []
+
+        def add_page(page):
+            workers.extend(page.get("workers", []))
+
+        self.tc_wm.listWorkers(provisioner, worker_type, paginationHandler=add_page)
+        return workers
+
     # TODO: implement retries like in outer function
     def get_pending_tasks(self, provisioner_id, worker_type):
         # results = self.tc_ai.currentScopes()
@@ -85,10 +101,12 @@ class TaskclusterClient:
 
     def get_quarantined_workers(self, provisioner, worker_type, results=None):
         if results is None:
-            results = self.tc_wm.listWorkers(provisioner, worker_type)
+            results = self.get_workers(provisioner, worker_type)
+        elif isinstance(results, dict):
+            results = results.get("workers", [])
         # do filtering
         quarantined_workers = []
-        for item in results["workers"]:
+        for item in results:
             if self.verbose:
                 pprint.pprint(item)
             # check if quarantineUntil is set and in the future

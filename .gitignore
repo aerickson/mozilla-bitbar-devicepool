@@ -16,5 +16,13 @@ hyperexecute*
 *.bak
 
 lt_run_cmd_output/
+
 # br doctor per-run artifacts
 .doctor/
+
+#
+BR_STATUS*
+
+#
+*.json
+*.csv

@@ -31,6 +31,30 @@ def test_get_workers_collects_paginated_results(client):
     assert client.get_workers("prov", "type") == [{"workerId": "worker-1"}, {"workerId": "worker-2"}]
 
 
+def test_get_worker_latest_task_activity_prefers_resolved_time(client):
+    class FakeQueue:
+        def status(self, task_id):
+            assert task_id == "task-id"
+            return {
+                "status": {
+                    "runs": [
+                        {"runId": 0, "started": "2026-08-24T21:45:00Z"},
+                        {
+                            "runId": 1,
+                            "started": "2026-08-24T21:50:00Z",
+                            "resolved": "2026-08-24T21:55:00Z",
+                        },
+                    ]
+                }
+            }
+
+    client.tc_queue = FakeQueue()
+
+    assert client.get_worker_latest_task_activity({"latestTask": {"taskId": "task-id", "runId": 1}}) == (
+        "2026-08-24T21:55:00Z"
+    )
+
+
 def test_get_quarantined_workers(client):
     # Injecting results directly to avoid api call mocking
     results = {

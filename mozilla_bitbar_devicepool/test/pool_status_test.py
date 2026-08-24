@@ -32,7 +32,7 @@ def test_build_pool_report_identifies_actionable_device_states():
     assert report["unconfigured_taskcluster_workers"] == ["former-device"]
 
 
-def test_build_pool_report_downgrades_busy_device_after_recent_tc_activity():
+def test_build_pool_report_suppresses_busy_finding_after_recent_tc_task():
     config = {
         "projects": {"a55-perf": {"TC_WORKER_TYPE": "gecko-t-lambda-perf-a55"}},
         "device_groups": {"a55-perf": ["device-1"]},
@@ -42,17 +42,19 @@ def test_build_pool_report_downgrades_busy_device_after_recent_tc_activity():
     report = pool_status.build_pool_report(
         config,
         {"A55": {"device-1": "busy"}},
-        [{"workerId": "device-1", "lastDateActive": "2026-08-24T21:55:00Z"}],
+        [{"workerId": "device-1"}],
         [],
         "a55-perf",
+        tc_task_activity_by_udid={"device-1": "2026-08-24T21:55:00Z"},
         recent_activity_minutes=10,
         now=now,
     )
 
     device = report["devices"][0]
-    assert device["finding"] == "busy_without_lt_job_after_recent_tc_activity"
-    assert device["severity"] == "info"
-    assert device["recent_tc_activity"]
+    assert device["finding"] is None
+    assert device["severity"] is None
+    assert device["recent_tc_task"]
+    assert device["tc_latest_task_activity"] == "2026-08-24T21:55:00Z"
 
 
 def test_main_outputs_json(monkeypatch, capsys):

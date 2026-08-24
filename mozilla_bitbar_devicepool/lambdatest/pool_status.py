@@ -25,20 +25,27 @@ LT_STATE_COLORS = {
 TC_WORKER_COLORS = {"ok": "\033[32m", "missing": "\033[31m"}
 
 
-def is_recent_taskcluster_activity(worker, now, recent_activity_minutes):
-    """Whether Worker Manager observed this worker active within the configured window."""
-    last_active = worker.get("lastDateActive")
-    if not last_active:
+def is_recent_timestamp(timestamp, now, recent_activity_minutes):
+    """Whether an ISO 8601 timestamp is within the configured window."""
+    if not timestamp:
         return False
-    last_active_at = datetime.datetime.fromisoformat(last_active.replace("Z", "+00:00"))
-    return now - last_active_at <= datetime.timedelta(minutes=recent_activity_minutes)
+    timestamp_at = datetime.datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    return now - timestamp_at <= datetime.timedelta(minutes=recent_activity_minutes)
 
 
 def build_pool_report(
-    config, lt_device_list, tc_workers, running_jobs, pool_name, recent_activity_minutes=10, now=None
+    config,
+    lt_device_list,
+    tc_workers,
+    running_jobs,
+    pool_name,
+    tc_task_activity_by_udid=None,
+    recent_activity_minutes=10,
+    now=None,
 ):
     """Join the three service views into a serializable per-device report."""
     now = now or datetime.datetime.now(datetime.timezone.utc)
+    tc_task_activity_by_udid = tc_task_activity_by_udid or {}
     pool_devices = set(config["device_groups"].get(pool_name) or [])
     worker_type = config["projects"][pool_name].get("TC_WORKER_TYPE")
     lt_devices = {
@@ -58,14 +65,18 @@ def build_pool_report(
         lt_device = lt_devices.get(udid)
         worker = workers_by_id.get(udid)
         lt_state = lt_device["state"] if lt_device else "missing"
-        recent_tc_activity = bool(worker and is_recent_taskcluster_activity(worker, now, recent_activity_minutes))
+        tc_task_activity = tc_task_activity_by_udid.get(udid)
+        recent_tc_task = is_recent_timestamp(tc_task_activity, now, recent_activity_minutes)
         finding = None
         severity = None
         if not lt_device:
             finding, severity = "missing_from_lambdatest", "warning"
         elif lt_state == "busy" and udid not in running_devices:
-            if recent_tc_activity:
-                finding, severity = "busy_without_lt_job_after_recent_tc_activity", "info"
+            if recent_tc_task:
+                # A worker that just completed or started a task is normally
+                # in the LT/TC handoff or teardown window. Keep metadata in
+                # JSON, but do not add noise to the human report.
+                pass
             else:
                 finding, severity = "busy_without_running_job", "warning"
         elif worker and worker.get("quarantined"):
@@ -85,7 +96,8 @@ def build_pool_report(
                 "tc_quarantined": bool(worker and worker.get("quarantined")),
                 "tc_quarantine_until": worker.get("quarantineUntil") if worker else None,
                 "tc_last_active": worker.get("lastDateActive") if worker else None,
-                "recent_tc_activity": recent_tc_activity,
+                "tc_latest_task_activity": tc_task_activity,
+                "recent_tc_task": recent_tc_task,
                 "running_lt_job": udid in running_devices,
                 "finding": finding,
                 "severity": severity,
@@ -156,10 +168,10 @@ def main():
     parser.add_argument("--pool", required=True, help="Configured LambdaTest pool to inspect")
     parser.add_argument("--jobs", "-j", type=int, default=100, help="Maximum running LambdaTest jobs to inspect")
     parser.add_argument(
-        "--recent-tc-activity-minutes",
+        "--recent-tc-task-minutes",
         type=int,
         default=10,
-        help="Treat busy devices with TC activity this recent as informational (default: 10)",
+        help="Suppress busy-without-job findings after a TC task this recent (default: 10)",
     )
     parser.add_argument("--only-problems", action="store_true", help="Hide healthy rows")
     parser.add_argument("--json", action="store_true", help="Write the report as JSON")
@@ -170,8 +182,8 @@ def main():
         help="Color findings in terminal output (default: auto)",
     )
     args = parser.parse_args()
-    if args.recent_tc_activity_minutes < 0:
-        parser.error("--recent-tc-activity-minutes must be non-negative")
+    if args.recent_tc_task_minutes < 0:
+        parser.error("--recent-tc-task-minutes must be non-negative")
 
     config_object = ConfigurationLt(lightweight=True, quiet=True)
     config_object.configure()
@@ -198,13 +210,31 @@ def main():
     for worker in workers:
         worker["quarantined"] = worker.get("workerId") in quarantined_ids
 
+    pool_devices = set(config["device_groups"].get(args.pool) or [])
+    busy_devices = {
+        udid
+        for devices in lt_device_list.values()
+        for udid, state in devices.items()
+        if state == "busy" and udid in pool_devices
+    }
+    running_devices = {
+        get_device_from_job_labels(string_list_to_list(job.get("job_label")), known_device_ids=pool_devices)
+        for job in running_jobs
+    }
+    tc_task_activity_by_udid = {
+        worker["workerId"]: tc_client.get_worker_latest_task_activity(worker)
+        for worker in workers
+        if worker.get("workerId") in busy_devices - running_devices
+    }
+
     report = build_pool_report(
         config,
         lt_device_list,
         workers,
         running_jobs,
         args.pool,
-        recent_activity_minutes=args.recent_tc_activity_minutes,
+        tc_task_activity_by_udid=tc_task_activity_by_udid,
+        recent_activity_minutes=args.recent_tc_task_minutes,
     )
     if args.json:
         print(json.dumps(report, indent=2, sort_keys=True))

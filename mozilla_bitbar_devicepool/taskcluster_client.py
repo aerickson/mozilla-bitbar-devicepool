@@ -84,6 +84,20 @@ class TaskclusterClient:
         self.tc_wm.listWorkers(provisioner, worker_type, paginationHandler=add_page)
         return workers
 
+    def get_worker_latest_task_activity(self, worker):
+        """Return the latest task's resolved time, or start time while it runs."""
+        latest_task = worker.get("latestTask") or {}
+        task_id = latest_task.get("taskId")
+        if not task_id:
+            return None
+
+        status = self.tc_queue.status(task_id).get("status", {})
+        latest_run_id = latest_task.get("runId")
+        run = next((run for run in status.get("runs", []) if run.get("runId") == latest_run_id), None)
+        if not run:
+            return None
+        return run.get("resolved") or run.get("started")
+
     # TODO: implement retries like in outer function
     def get_pending_tasks(self, provisioner_id, worker_type):
         # results = self.tc_ai.currentScopes()

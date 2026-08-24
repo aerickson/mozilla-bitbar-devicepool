@@ -1,14 +1,18 @@
-[tool.poetry]
+[project]
 name = "mozilla-bitbar-devicepool"
 version = "2.0.0"
 description = "Manage Mozilla Android Hardware testing at Bitbar"
-authors = ["Bob Clary <bclary@mozilla.com>", "Andrew Erickson <aerickson@mozilla.com>"]
-maintainers = ["Andrew Erickson <aerickson@mozilla.com>"]
-license = "MPL-2.0"
 readme = "README.md"
-repository = "https://github.com/mozilla-platform-ops/mozilla-bitbar-devicepool"
-packages = [{include = "mozilla_bitbar_devicepool"}]
+requires-python = ">=3.9,<4.0"
+license = "MPL-2.0"
+authors = [{name = "Bob Clary", email = "bclary@mozilla.com"}, {name = "Andrew Erickson", email = "aerickson@mozilla.com"}]
+maintainers = [{name = "Andrew Erickson", email = "aerickson@mozilla.com"}]
 classifiers = ["Operating System :: OS Independent"]
+urls = {Repository = "https://github.com/mozilla-platform-ops/mozilla-bitbar-devicepool"}
+dynamic = ["dependencies"]
+
+[tool.poetry]
+packages = [{include = "mozilla_bitbar_devicepool"}]
 
 [tool.poetry.dependencies]
 python = "^3.9"
@@ -39,7 +43,7 @@ deptry = "^0.23.0"
 mozdevice = "^4.2.0"
 pytest-mock = "^3.14.0"
 
-[tool.poetry.scripts]
+[project.scripts]
 # TODO: rework all of these (tcdp-lt, tcdp-bb?)
 # TODO: use consistent way of differentiating lt vs bb bins
 mbd = 'mozilla_bitbar_devicepool.main:main'

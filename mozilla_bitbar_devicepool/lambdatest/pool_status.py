@@ -5,6 +5,8 @@ import datetime
 import json
 import os
 import sys
+import tempfile
+from pathlib import Path
 
 from mozilla_bitbar_devicepool.configuration_lt import ConfigurationLt
 from mozilla_bitbar_devicepool.lambdatest.api import get_jobs
@@ -23,6 +25,93 @@ LT_STATE_COLORS = {
     "missing": "\033[31m",
 }
 TC_WORKER_COLORS = {"ok": "\033[32m", "missing": "\033[31m"}
+STUCK_FINDING = "busy_without_running_job"
+
+
+def default_observation_path():
+    """Return the private, tool-specific cache path for device observations."""
+    cache_root = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
+    return cache_root / "mozilla-bitbar-devicepool" / "lt-pool-status" / "observations.json"
+
+
+def format_duration(duration):
+    seconds = max(0, int(duration.total_seconds()))
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m"
+    return f"{seconds // 3600}h {seconds % 3600 // 60}m"
+
+
+def load_observations(observation_path):
+    """Load prior observations, treating an unreadable cache as empty."""
+    try:
+        contents = json.loads(observation_path.read_text())
+        observations = contents.get("observations", {})
+        return observations if isinstance(observations, dict) else {}
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return {}
+
+
+def write_observations(observation_path, observations):
+    """Atomically write the private observation cache."""
+    observation_path.parent.mkdir(parents=True, exist_ok=True)
+    observation_path.parent.chmod(0o700)
+    with tempfile.NamedTemporaryFile("w", dir=observation_path.parent, delete=False) as temp_file:
+        json.dump({"version": 1, "observations": observations}, temp_file, indent=2, sort_keys=True)
+        temp_file.write("\n")
+        temp_path = Path(temp_file.name)
+    temp_path.chmod(0o600)
+    temp_path.replace(observation_path)
+
+
+def observed_duration(observed_since, now):
+    """Return a valid start timestamp and elapsed seconds for an observation."""
+    try:
+        observed_at = datetime.datetime.fromisoformat(observed_since.replace("Z", "+00:00"))
+        if observed_at.tzinfo is None or observed_at > now:
+            raise ValueError("Invalid observation timestamp")
+    except (AttributeError, ValueError):
+        observed_since = now.isoformat()
+        observed_at = now
+    return observed_since, int((now - observed_at).total_seconds())
+
+
+def update_state_observations(report, lt_username, observation_path=None, now=None):
+    """Track current LT state durations, retaining separate stuck durations."""
+    now = now or datetime.datetime.now(datetime.timezone.utc)
+    observation_path = observation_path or default_observation_path()
+    previous_observations = load_observations(observation_path)
+    observation_prefix = f"{lt_username}:{report['pool']}:"
+    observations = {
+        key: observation for key, observation in previous_observations.items() if not key.startswith(observation_prefix)
+    }
+
+    for device in report["devices"]:
+        key = f"{observation_prefix}{device['udid']}"
+        previous = previous_observations.get(key, {})
+        observed_since = None
+        if previous.get("lt_state") == device["lt_state"]:
+            observed_since = previous.get("state_observed_since")
+        elif "lt_state" not in previous and device["lt_state"] == "busy":
+            # Older caches only recorded stuck devices, which were always busy.
+            observed_since = previous.get("observed_since")
+        device["state_observed_since"], device["state_observed_for_seconds"] = observed_duration(observed_since, now)
+        observation = {
+            "lt_state": device["lt_state"],
+            "state_observed_since": device["state_observed_since"],
+            "last_seen": now.isoformat(),
+        }
+        device["stuck_observed_since"] = None
+        device["stuck_observed_for_seconds"] = None
+        if device["finding"] == STUCK_FINDING:
+            device["stuck_observed_since"], device["stuck_observed_for_seconds"] = observed_duration(
+                previous.get("observed_since"), now
+            )
+            observation["observed_since"] = device["stuck_observed_since"]
+        observations[key] = observation
+
+    write_observations(observation_path, observations)
 
 
 def is_recent_timestamp(timestamp, now, recent_activity_minutes):
@@ -99,6 +188,10 @@ def build_pool_report(
                 "tc_latest_task_activity": tc_task_activity,
                 "recent_tc_task": recent_tc_task,
                 "running_lt_job": udid in running_devices,
+                "state_observed_since": None,
+                "state_observed_for_seconds": None,
+                "stuck_observed_since": None,
+                "stuck_observed_for_seconds": None,
                 "finding": finding,
                 "severity": severity,
             }
@@ -141,11 +234,14 @@ def print_pool_report(report, only_problems=False, color=False):
             device["lt_state"],
             "missing" if device["tc_worker_state"] == "missing" else "ok",
             "running" if device["running_lt_job"] else "-",
+            format_duration(datetime.timedelta(seconds=device["state_observed_for_seconds"]))
+            if device.get("state_observed_for_seconds") is not None
+            else "-",
             device["finding"] or "ok",
         )
         for device in devices
     ]
-    headings = ("UDID", "LT state", "TC worker", "LT job", "finding")
+    headings = ("UDID", "LT state", "TC worker", "LT job", "observed", "finding")
     widths = [max(len(heading), *(len(row[index]) for row in rows)) for index, heading in enumerate(headings)]
     print("  ".join(f"{heading:<{width}}" for heading, width in zip(headings, widths)))
     for device, row in zip(devices, rows):
@@ -181,6 +277,11 @@ def main():
         help="Suppress busy-without-job findings after a TC task this recent (default: 10)",
     )
     parser.add_argument("--only-problems", action="store_true", help="Hide healthy rows")
+    parser.add_argument(
+        "--state-file",
+        type=Path,
+        help="Override the tool-specific device-state observation cache path",
+    )
     output_format = parser.add_mutually_exclusive_group()
     output_format.add_argument("--json", action="store_true", help="Write the report as JSON")
     output_format.add_argument("--ids-only", action="store_true", help="Write only device UDIDs, one per line")
@@ -245,6 +346,7 @@ def main():
         tc_task_activity_by_udid=tc_task_activity_by_udid,
         recent_activity_minutes=args.recent_tc_task_minutes,
     )
+    update_state_observations(report, status_client.lt_username, observation_path=args.state_file)
     if args.json:
         report = {**report, "devices": select_devices(report, args.only_problems)}
         print(json.dumps(report, indent=2, sort_keys=True))

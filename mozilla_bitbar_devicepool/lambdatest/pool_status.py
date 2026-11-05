@@ -226,7 +226,8 @@ def print_pool_report(report, only_problems=False, color=False):
     print(f"Pool: {report['pool']} ({report['worker_type']})")
     print(
         f"Configured devices: {report['configured_device_count']}; "
-        f"active Taskcluster workers: {report['taskcluster_worker_count']}"
+        f"active Taskcluster workers: {report['taskcluster_worker_count']}; "
+        f"pending Taskcluster tasks: {report['pending_task_count']}"
     )
     rows = [
         (
@@ -346,6 +347,10 @@ def main():
         tc_task_activity_by_udid=tc_task_activity_by_udid,
         recent_activity_minutes=args.recent_tc_task_minutes,
     )
+    if not args.ids_only:
+        report["pending_task_count"] = tc_client.get_pending_tasks(
+            PROVISIONER_ID, config["projects"][args.pool]["TC_WORKER_TYPE"]
+        )
     update_state_observations(report, status_client.lt_username, observation_path=args.state_file)
     if args.json:
         report = {**report, "devices": select_devices(report, args.only_problems)}

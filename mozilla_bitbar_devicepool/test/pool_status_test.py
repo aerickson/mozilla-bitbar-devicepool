@@ -177,6 +177,10 @@ def test_main_outputs_json(monkeypatch, capsys, tmp_path, output_format, only_pr
         def get_quarantined_workers(self, provisioner_id, worker_type, workers):
             return []
 
+        def get_pending_tasks(self, provisioner_id, worker_type):
+            assert (provisioner_id, worker_type) == ("proj-autophone", "worker-type")
+            return 0
+
     monkeypatch.setenv("LT_USERNAME", "user")
     monkeypatch.setenv("LT_ACCESS_KEY", "key")
     monkeypatch.setattr(pool_status, "ConfigurationLt", FakeConfiguration)
@@ -197,6 +201,7 @@ def test_main_outputs_json(monkeypatch, capsys, tmp_path, output_format, only_pr
         report = json.loads(output)
         assert report["pool"] == "a55-perf"
         assert report["configured_device_count"] == 1
+        assert report["pending_task_count"] == 0
         if only_problems:
             assert report["devices"] == []
         else:
@@ -231,6 +236,7 @@ def test_only_problems_includes_informational_findings(capsys):
             "worker_type": "worker-type",
             "configured_device_count": 2,
             "taskcluster_worker_count": 0,
+            "pending_task_count": 0,
             "unconfigured_taskcluster_workers": [],
             "devices": [
                 {
@@ -258,6 +264,7 @@ def test_only_problems_includes_informational_findings(capsys):
     assert "no-worker" in output
     assert "ok-device" not in output
     assert "LT state     TC worker" in output
+    assert "pending Taskcluster tasks: 0" in output
 
 
 def test_pool_report_colors_findings(capsys):
@@ -267,6 +274,7 @@ def test_pool_report_colors_findings(capsys):
             "worker_type": "worker-type",
             "configured_device_count": 1,
             "taskcluster_worker_count": 0,
+            "pending_task_count": 3,
             "unconfigured_taskcluster_workers": [],
             "devices": [
                 {
@@ -285,6 +293,7 @@ def test_pool_report_colors_findings(capsys):
     output = capsys.readouterr().out
     assert "\033[31mmissing_from_lambdatest\033[0m" in output
     assert "\033[31mmissing" in output
+    assert "pending Taskcluster tasks: 3" in output
 
 
 def test_pool_report_uses_simple_taskcluster_worker_status(capsys):
@@ -294,6 +303,7 @@ def test_pool_report_uses_simple_taskcluster_worker_status(capsys):
             "worker_type": "worker-type",
             "configured_device_count": 1,
             "taskcluster_worker_count": 1,
+            "pending_task_count": 0,
             "unconfigured_taskcluster_workers": [],
             "devices": [
                 {

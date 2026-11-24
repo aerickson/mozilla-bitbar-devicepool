@@ -32,6 +32,7 @@ projects:
     TASKCLUSTER_CLIENT_ID: project/autophone/gecko-t-lambda-stab
     TC_WORKER_TYPE: gecko-t-lambda-stab
   test-1:
+    # The test-1 hosts have an extra USB hub and are also used for USB performance testing.
     # Disable HyperExecute network capture for live-site tests (Bug 2039991).
     USER_SCRIPTS_VERSION: v10-disable-network-capture
     TASKCLUSTER_CLIENT_ID: project/autophone/gecko-t-lambda-test-1

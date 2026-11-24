@@ -1,0 +1,10 @@
+v1: initial version
+v2: changes include:
+    - python 3.12.11 and hg 7.0.2
+    - tc version 87.0
+    - robustcheckout: use latest version
+    - pre: setup_script is quieter with less output
+    - post: retry a few times to get device (no improvement with device disconnection issues, but no harm)
+v8: disable scrcpy video recording (video: false). Based on v5.
+v9: also disable scrcpy live video streaming (liveVideo: false) in addition to video. Based on v8.
+v10: disable HyperExecute network capture and logging (network: false, networkLog: false) for Bug 2039991. Based on v9.

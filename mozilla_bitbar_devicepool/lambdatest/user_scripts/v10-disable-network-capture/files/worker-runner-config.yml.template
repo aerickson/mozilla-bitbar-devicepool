@@ -1,0 +1,27 @@
+provider:
+    providerType: standalone
+    rootURL: "https://firefox-ci-tc.services.mozilla.com"
+    clientID: "${TASKCLUSTER_CLIENT_ID}"
+    accessToken: "${TASKCLUSTER_ACCESS_TOKEN}"
+    workerPoolID: "proj-autophone/${TC_WORKER_TYPE}"
+    workerGroup: "${TC_WORKER_GROUP}"
+    workerID: "${DEVICE_NAME}"
+getSecrets: false
+worker:
+    implementation: generic-worker
+    path: /home/ltuser/taskcluster/generic-worker
+    configPath: /home/ltuser/taskcluster/generic-worker.yml
+workerConfig:
+    certificate:                ""
+    ed25519SigningKeyLocation:   "${ED25519_PRIVKEY}"
+    idleTimeoutSecs:            600
+    livelogExecutable:          "/home/ltuser/taskcluster/livelog"
+    numberOfTasksToRun:         1
+    provisionerId:              "proj-autophone"
+    publicIP:                   "127.0.0.1"
+    requiredDiskSpaceMegabytes: 6500
+    taskclusterProxyPort:       8099
+    workerType:                 "${TC_WORKER_TYPE}"
+    wstAudience:                "firefoxcitc"
+    wstServerURL:               "https://firefoxci-websocktunnel.services.mozilla.com/"
+disableReboots:   true

@@ -1,0 +1,102 @@
+
+# Define the version of the configuration file
+version: "0.2"
+
+# Enable autosplit for test execution
+autosplit: true
+
+# Specify the target platform for test execution (Android in this case)
+runson: android
+
+# Set the concurrency level for test execution (2 devices in parallel)
+concurrency: $concurrency
+
+# Test discovery configuration
+testDiscovery:
+  command: $test_discover_cmd
+  # Test discovery mode is static
+  mode: static
+  # Test type is raw (custom test implementation)
+  type: raw
+
+runtime:
+  - language: java
+    version: "17"
+  - language: node
+    version: '20'
+  - language: python
+    version: '3.12'
+
+env:
+    # inject our own secrets
+    TASKCLUSTER_CLIENT_ID: $tc_client_id
+    TASKCLUSTER_ACCESS_TOKEN: $tc_access_token
+    TC_WORKER_TYPE: $tc_worker_type
+
+# Command to run the tests using the testRunnerCommand
+# testRunnerCommand: ls -la
+# testRunnerCommand: cat /home/ltuser/taskcluster/worker-runner-config.yml
+# testRunnerCommand: start-worker /home/ltuser/taskcluster/worker-runner-config.yml
+# testRunnerCommand: python3 /home/ltuser/taskcluster/run_gw.py
+testRunnerCommand: bash -c 'source /home/ltuser/venv/bin/activate; python3 /home/ltuser/taskcluster/run_gw.py'
+
+# Only report the status of the test framework
+frameworkStatusOnly: true
+
+# Enable dynamic allocation of resources
+dynamicAllocation: true
+
+shell: bash
+
+# aje: moved all to test command as something we're doing in pre is disconnecting the device per LT
+#
+# Pre-install required dependencies using pip
+# TODO: remove the pip3 install mozdevice once everything is off v1 of user scripts
+pre:
+  - pip3 install mozdevice
+  - bash ./user_script/setup_script.sh
+
+# reboot and wait for device to come online
+post:
+  - python3 ./user_script/reboot_and_wait.py
+
+# cache the payload
+differentialUpload:
+  enabled: true
+  ttlHours: 360
+
+# Test framework configuration
+framework:
+  # Name of the test framework (raw in this case)
+  name: raw
+  args:
+    # used to restrict device model and os version
+    # - we don't use it currently (see fixedIP), so use wildcard
+    devices:
+        - ".*-.*"
+    framework:
+    # fixedIP: can take the UDID a specific devices to run on
+    $fixed_ip_line
+    # Enable or disable video recording support
+    video: false
+    # Enable or disable live video streaming support (scrcpy virtual display)
+    liveVideo: false
+    # Disable HyperExecute network capture and logging (Bug 2039991).
+    network: false
+    networkLog: false
+    # Enable or disable device log support
+    deviceLogs: true
+    # App ID to be installed (mandatory field, using <app_id>)
+    # appId: $lt_app_url
+    # Build name for identification on the automation dashboard
+    buildName: geckoview_example.apk
+    # All devices are in a private cloud
+    privateCloud: true
+    # Timeout for device queue
+    queueTimeout: 600
+    # Configuration fields specific to running raw tests
+    region: us
+    disableReleaseDevice: true
+    isRealMobile: true
+    reservation: false
+    platformName: android

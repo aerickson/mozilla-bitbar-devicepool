@@ -6,6 +6,7 @@ import json
 import os
 import sys
 import tempfile
+from collections import defaultdict
 from pathlib import Path
 
 from mozilla_bitbar_devicepool.configuration_lt import ConfigurationLt
@@ -120,6 +121,24 @@ def is_recent_timestamp(timestamp, now, recent_activity_minutes):
     return now - timestamp_at <= datetime.timedelta(minutes=recent_activity_minutes)
 
 
+def get_job_elapsed(job, now):
+    """Return elapsed seconds and the HyperExecute timestamp field they came from."""
+    for field in ("start_time", "created_at"):
+        timestamp = job.get(field)
+        try:
+            if isinstance(timestamp, str):
+                timestamp_at = datetime.datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+            elif isinstance(timestamp, (int, float)) and not isinstance(timestamp, bool):
+                timestamp_at = datetime.datetime.fromtimestamp(timestamp, datetime.timezone.utc)
+            else:
+                continue
+        except (ValueError, OverflowError, OSError):
+            continue
+        if timestamp_at.tzinfo is not None and timestamp_at <= now:
+            return int((now - timestamp_at).total_seconds()), field
+    return None, None
+
+
 def build_pool_report(
     config,
     lt_device_list,
@@ -143,20 +162,24 @@ def build_pool_report(
         for udid, state in devices.items()
     }
     workers_by_id = {worker["workerId"]: worker for worker in tc_workers if worker.get("workerId")}
-    running_devices = {
-        get_device_from_job_labels(string_list_to_list(job.get("job_label")), known_device_ids=pool_devices)
-        for job in running_jobs
-    }
-    running_devices.discard(None)
+    jobs_by_device = defaultdict(list)
+    for job in running_jobs:
+        udid = get_device_from_job_labels(string_list_to_list(job.get("job_label")), known_device_ids=pool_devices)
+        if udid is not None:
+            jobs_by_device[udid].append(job)
 
     devices = []
     for udid in sorted(pool_devices):
-        running_lt_job = udid in running_devices
+        device_jobs = jobs_by_device.get(udid, [])
+        running_lt_job = bool(device_jobs)
         if not running_lt_job and running_jobs_incomplete_reason:
             running_lt_job = None
         lt_device = lt_devices.get(udid)
         worker = workers_by_id.get(udid)
         lt_state = lt_device["state"] if lt_device else "missing"
+        job_elapsed, job_elapsed_basis = None, None
+        if lt_state == "busy" and len(device_jobs) == 1:
+            job_elapsed, job_elapsed_basis = get_job_elapsed(device_jobs[0], now)
         tc_task_activity = tc_task_activity_by_udid.get(udid)
         recent_tc_task = is_recent_timestamp(tc_task_activity, now, recent_activity_minutes)
         finding = None
@@ -191,6 +214,8 @@ def build_pool_report(
                 "tc_latest_task_activity": tc_task_activity,
                 "recent_tc_task": recent_tc_task,
                 "running_lt_job": running_lt_job,
+                "lt_job_elapsed_seconds": job_elapsed,
+                "lt_job_elapsed_basis": job_elapsed_basis,
                 "state_observed_since": None,
                 "state_observed_for_seconds": None,
                 "stuck_observed_since": None,
@@ -223,6 +248,18 @@ def select_devices(report, only_problems=False):
     )
 
 
+def format_job_elapsed(device):
+    if device["lt_state"] != "busy" or device["running_lt_job"] is False:
+        return "-"
+    elapsed_seconds = device.get("lt_job_elapsed_seconds")
+    if elapsed_seconds is None:
+        return "unknown"
+    elapsed = format_duration(datetime.timedelta(seconds=elapsed_seconds))
+    if device.get("lt_job_elapsed_basis") == "created_at":
+        return f"{elapsed} (age)"
+    return elapsed
+
+
 def print_pool_report(report, only_problems=False, color=False):
     """Render a compact, human-readable version of a pool report."""
     devices = select_devices(report, only_problems)
@@ -243,11 +280,12 @@ def print_pool_report(report, only_problems=False, color=False):
             format_duration(datetime.timedelta(seconds=device["state_observed_for_seconds"]))
             if device.get("state_observed_for_seconds") is not None
             else "-",
+            format_job_elapsed(device),
             device["finding"] or "ok",
         )
         for device in devices
     ]
-    headings = ("UDID", "LT state", "TC worker", "LT job", "observed", "finding")
+    headings = ("UDID", "LT state", "TC worker", "LT job", "observed", "LT job elapsed", "finding")
     widths = [max([len(heading), *(len(row[index]) for row in rows)]) for index, heading in enumerate(headings)]
     print("  ".join(f"{heading:<{width}}" for heading, width in zip(headings, widths)))
     for device, row in zip(devices, rows):

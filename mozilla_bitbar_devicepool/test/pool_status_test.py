@@ -60,6 +60,52 @@ def test_build_pool_report_suppresses_busy_finding_after_recent_tc_task():
     assert device["tc_latest_task_activity"] == "2026-08-24T21:55:00Z"
 
 
+@pytest.mark.parametrize(
+    ("state", "job_times", "expected_seconds", "expected_basis", "expected_display"),
+    [
+        (
+            "busy",
+            [{"start_time": "2026-08-24T21:53:00Z", "created_at": "2026-08-24T21:50:00Z"}],
+            420,
+            "start_time",
+            "7m",
+        ),
+        ("busy", [{"start_time": 1787608800}], 0, "start_time", "0s"),
+        ("busy", [{"start_time": "invalid", "created_at": "2026-08-24T21:50:00Z"}], 600, "created_at", "10m (age)"),
+        ("busy", [{"start_time": "2026-08-24T22:01:00Z"}], None, None, "unknown"),
+        ("busy", [{}], None, None, "unknown"),
+        ("busy", [], None, None, "unknown"),
+        ("busy", [{"start_time": "2026-08-24T21:50:00Z"}] * 2, None, None, "unknown"),
+        ("active", [{"start_time": "2026-08-24T21:50:00Z"}], None, None, "-"),
+    ],
+)
+def test_pool_report_shows_elapsed_time_for_busy_device_with_one_matching_job(
+    state, job_times, expected_seconds, expected_basis, expected_display, capsys
+):
+    config = {
+        "projects": {"a55-perf": {"TC_WORKER_TYPE": "worker-type"}},
+        "device_groups": {"a55-perf": ["device-1"]},
+    }
+    now = datetime.datetime(2026, 8, 24, 22, 0, tzinfo=datetime.timezone.utc)
+    report = pool_status.build_pool_report(
+        config,
+        {"A55": {"device-1": state}},
+        [{"workerId": "device-1"}],
+        [{"job_label": '["device-1"]', **timestamps} for timestamps in job_times],
+        "a55-perf",
+        now=now,
+        running_jobs_incomplete_reason="HyperExecute pagination cursor did not advance",
+    )
+    report["pending_task_count"] = 0
+
+    device = report["devices"][0]
+    assert device["lt_job_elapsed_seconds"] == expected_seconds
+    assert device["lt_job_elapsed_basis"] == expected_basis
+    pool_status.print_pool_report(report)
+    _, _, headings, row, _ = capsys.readouterr().out.splitlines()
+    assert row[headings.index("LT job elapsed") : headings.index("finding")].strip() == expected_display
+
+
 def test_stuck_observation_tracks_continuous_state_and_resets(tmp_path):
     observation_path = tmp_path / "lt-pool-status" / "observations.json"
     initial_time = datetime.datetime(2026, 9, 3, 18, 0, tzinfo=datetime.timezone.utc)

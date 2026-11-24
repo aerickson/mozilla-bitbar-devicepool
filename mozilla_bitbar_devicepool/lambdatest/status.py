@@ -8,8 +8,13 @@ import os
 import pprint
 import sys
 
+from requests import RequestException
+
 import mozilla_bitbar_devicepool.lambdatest.util as util
 from mozilla_bitbar_devicepool.lambdatest.api import get_devices, get_jobs
+
+RUNNING_JOB_STATUS = "running"
+RUNNING_JOBS_TIME_BUDGET_SECONDS = 15
 
 # idea: uses api data to build a status/state
 #   - a presentation layer for data from api.py
@@ -34,6 +39,10 @@ from mozilla_bitbar_devicepool.lambdatest.api import get_devices, get_jobs
 # 'timeout': 0},
 
 
+class StatusDataUnavailable(RuntimeError):
+    """The data needed to classify LambdaTest devices is unavailable."""
+
+
 class Status:
     def __init__(self, lt_username, lt_api_key):
         self.lt_username = lt_username
@@ -44,6 +53,16 @@ class Status:
     def get_jobs(self, jobs=100):
         jobs = get_jobs(self.lt_username, self.lt_api_key, jobs=jobs)
         return jobs
+
+    def get_running_job_scan(self, jobs=100):
+        return get_jobs(
+            self.lt_username,
+            self.lt_api_key,
+            jobs=jobs,
+            status=RUNNING_JOB_STATUS,
+            allow_partial=True,
+            time_budget=RUNNING_JOBS_TIME_BUDGET_SECONDS,
+        )
 
     def get_job_dict(self, jobs=100):
         jobs = get_jobs(self.lt_username, self.lt_api_key, jobs=jobs)
@@ -150,11 +169,19 @@ class Status:
     #            'RXYA1824': 'online'},
     #   {'a51': {'DB123212': 'online'}
     # }
-    def get_device_list(self, device_type_and_os_filter=None, verbose=False):
+    def get_device_list(self, device_type_and_os_filter=None, verbose=False, *, require_inventory=False):
         result_dict = {}
-        output = get_devices(self.lt_username, self.lt_api_key)
-        if not output:
-            return result_dict
+        if require_inventory:
+            try:
+                output = get_devices(self.lt_username, self.lt_api_key, raise_on_error=True)
+                devices = output["data"]["private_cloud_devices"]
+                if not isinstance(devices, list):
+                    raise TypeError("expected a device list")
+            except (RequestException, KeyError, TypeError) as exc:
+                raise StatusDataUnavailable("LambdaTest device inventory unavailable.") from exc
+        else:
+            output = get_devices(self.lt_username, self.lt_api_key)
+            devices = output["data"]["private_cloud_devices"] if output else []
         # if verbose:
         #     pprint.pprint(output)
 
@@ -165,7 +192,7 @@ class Status:
             device_type = device_type_and_os_filter.split("-")[0]
             device_os = device_type_and_os_filter.split("-")[1]
 
-        for device in output["data"]["private_cloud_devices"]:
+        for device in devices:
             if verbose:
                 pprint.pprint(device)
             # TODO: make the key include OS? 'fullOsVersion'
@@ -221,6 +248,34 @@ class Status:
                     result_int += 1
         return result_int
 
+    def get_busy_devices_without_running_jobs(self, jobs=100):
+        """Return busy devices that are not labeled by a running HyperExecute job.
+
+        LambdaTest's device API and the HyperExecute jobs API are separate views
+        of the service.  A device reported as ``busy`` with no matching running
+        job is a candidate for a stale LambdaTest allocation.
+        """
+        device_list = self.get_device_list(require_inventory=True)
+        devices_by_udid = {
+            udid: device_type
+            for device_type, devices in device_list.items()
+            for udid, state in devices.items()
+            if state == "busy"
+        }
+        if not devices_by_udid:
+            return []
+
+        job_scan = self.get_running_job_scan(jobs)
+        if job_scan["incomplete_reason"]:
+            raise StatusDataUnavailable(f"Running LambdaTest job scan incomplete ({job_scan['incomplete_reason']}).")
+        busy_udids = set(devices_by_udid)
+        running_udids = {
+            util.get_device_from_job_labels(util.string_list_to_list(job.get("job_label")), known_device_ids=busy_udids)
+            for job in job_scan["data"]
+        }
+        unmatched_udids = busy_udids - running_udids
+        return [{"udid": udid, "device_type": devices_by_udid[udid]} for udid in sorted(unmatched_udids)]
+
 
 def lt_status_main():
     import os
@@ -269,6 +324,37 @@ def lt_status_main():
         print("  Busy device UDIDs:")
         for udid in busy_udids:
             print(f"    - {udid}")
+
+
+def lt_stuck_device_report():
+    """Report LambdaTest devices allocated without a matching running job."""
+    parser = argparse.ArgumentParser(
+        description="Find LambdaTest devices marked busy without a matching running HyperExecute job."
+    )
+    parser.add_argument(
+        "--jobs",
+        "-j",
+        type=int,
+        default=100,
+        help="Maximum running jobs to inspect (default: 100)",
+    )
+    args = parser.parse_args()
+    if args.jobs <= 0:
+        parser.error("--jobs must be positive")
+
+    status = Status(os.environ["LT_USERNAME"], os.environ["LT_ACCESS_KEY"])
+    try:
+        stuck_devices = status.get_busy_devices_without_running_jobs(jobs=args.jobs)
+    except StatusDataUnavailable as exc:
+        raise SystemExit(str(exc)) from exc
+    if not stuck_devices:
+        print("No stuck LambdaTest devices found.")
+        return
+
+    print(f"Stuck LambdaTest devices ({len(stuck_devices)}):")
+    print("  These are busy in the device API but have no matching running HyperExecute job.")
+    for device in stuck_devices:
+        print(f"  - {device['udid']} ({device['device_type']})")
 
 
 # TODO: idea: report that gets percentage of failing/total jobs

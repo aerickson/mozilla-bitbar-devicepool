@@ -6,10 +6,11 @@ import base64
 import os
 import pprint
 from datetime import timedelta
+from time import monotonic
 
-import requests.adapters
+import requests
 import requests_cache
-from urllib3.util import Retry
+from urllib3.util import Retry, Timeout
 
 # Create a cached session with 10 second expiry
 # Only requests using this session will be cached
@@ -27,6 +28,7 @@ retry_strategy = Retry(
 adapter = requests.adapters.HTTPAdapter(max_retries=retry_strategy)
 cached_session.mount("http://", adapter)
 cached_session.mount("https://", adapter)
+bounded_jobs_session = requests.Session()
 
 # https://www.lambdatest.com/support/api-doc/
 
@@ -47,11 +49,12 @@ def get_jobs(
     timeout=(10, 30),
     status=None,
     print_url=False,
+    *,
+    allow_partial=False,
+    time_budget=None,
 ):
-    # check that jobs is greater than page_size
-    if jobs < page_size:
-        page_size = jobs
-
+    """Fetch unique jobs, optionally returning data and an incomplete_reason on a partial scan."""
+    page_size = min(page_size, jobs)
     url_base = (
         "https://api.hyperexecute.cloud/v1.0/jobs"
         f"?show_test_summary={show_test_summary}"
@@ -71,61 +74,90 @@ def get_jobs(
     base64_auth_string = base64.b64encode(auth_string.encode("utf-8")).decode("utf-8")
     headers["Authorization"] = f"Basic {base64_auth_string}"
 
+    deadline = None if time_budget is None else monotonic() + time_budget
     all_jobs = []
+    seen_jobs = set()
+    seen_cursors = set()
     next_cursor = None
-    fetched = 0
+    result = {}
+    incomplete_reason = None
 
-    while True:
+    while len(all_jobs) < jobs:
         url = url_base
-        if next_cursor:
+        if next_cursor is not None:
             url += f"&cursor={next_cursor}"
 
-        response = cached_session.get(url, headers=headers, timeout=timeout)
         if print_url:
             print(f"Fetching {url}...")
+        try:
+            if deadline is None:
+                response = cached_session.get(url, headers=headers, timeout=timeout)
+            else:
+                remaining = deadline - monotonic()
+                if remaining <= 0:
+                    incomplete_reason = "time budget exhausted"
+                    break
+                connect_timeout, read_timeout = timeout
+                response = bounded_jobs_session.get(
+                    url,
+                    headers=headers,
+                    timeout=Timeout(total=remaining, connect=connect_timeout, read=read_timeout),
+                    allow_redirects=False,
+                )
+        except requests.RequestException as exc:
+            if not allow_partial:
+                raise
+            incomplete_reason = "request timed out" if isinstance(exc, requests.Timeout) else "request failed"
+            break
         if response.status_code != 200:
-            print(f"Error: {response.status_code}")
-            print(f"  while fetching {url}")
-            print(response.text)
-            return None
-        result = response.json()
-
-        jobs_data = result.get("data", [])
-        if label_filter_arr:
-            filtered_jobs = []
-            for job in jobs_data:
-                job_label_data = job.get("job_label")
-                if not job_label_data:
-                    continue
-                job_labels = job["job_label"]
-                if all(label in job_labels for label in label_filter_arr):
-                    filtered_jobs.append(job)
-            jobs_data = filtered_jobs
-
-        # update next_cursor with the last job's job_number
-        if jobs_data:
-            next_cursor = jobs_data[-1]["job_number"]
-
-        all_jobs.extend(jobs_data)
-        fetched += len(jobs_data)
-
-        # Check if we have enough jobs or no more pages
-        # next_cursor = result.get("next_cursor") #job['job_number']
-        if fetched >= jobs:
+            if not allow_partial:
+                print(f"Error: {response.status_code}")
+                print(f"  while fetching {url}")
+                print(response.text)
+                return None
+            incomplete_reason = f"HyperExecute returned HTTP {response.status_code}"
+            break
+        try:
+            page = response.json()
+        except requests.exceptions.JSONDecodeError:
+            if not allow_partial:
+                raise
+            incomplete_reason = "HyperExecute returned invalid JSON"
             break
 
-    # Trim to the requested number of jobs
-    # TODO: needed?
-    all_jobs = all_jobs[:jobs]
+        jobs_data = page.get("data") if isinstance(page, dict) else None
+        if not isinstance(jobs_data, list):
+            incomplete_reason = "HyperExecute returned an invalid jobs page"
+            break
+        result = page
+        if not jobs_data:
+            break
+        for job in jobs_data:
+            job_number = job.get("job_number")
+            if job_number is not None:
+                if job_number in seen_jobs:
+                    continue
+                seen_jobs.add(job_number)
+            if not label_filter_arr or all(label in (job.get("job_label") or []) for label in label_filter_arr):
+                all_jobs.append(job)
+        # A page with no matching labels can still advance pagination.
+        next_cursor = jobs_data[-1].get("job_number")
+        if next_cursor is None or next_cursor in seen_cursors:
+            incomplete_reason = "HyperExecute pagination cursor did not advance"
+            break
+        seen_cursors.add(next_cursor)
+    else:
+        incomplete_reason = f"reached the {jobs}-job scan limit"
 
-    # Return in the same format as before
-    result["data"] = all_jobs
+    result["data"] = all_jobs[:jobs]
+    if allow_partial:
+        result["incomplete_reason"] = incomplete_reason
     return result
 
 
 # WORKS
 # timeout arg: 10 seconds to establish connection, 30 seconds to read response
-def get_devices(lt_username, lt_api_key, timeout=(10, 30)):
+def get_devices(lt_username, lt_api_key, timeout=(10, 30), *, raise_on_error=False):
     # curl --location --request GET 'https://mobile-api.lambdatest.com/mobile-automation/api/v1/privatecloud_devices' -H  "Authorization: Basic REDACTED"
 
     url = "https://mobile-api.lambdatest.com/mobile-automation/api/v1/privatecloud_devices"
@@ -141,6 +173,8 @@ def get_devices(lt_username, lt_api_key, timeout=(10, 30)):
     response = cached_session.get(url, headers=headers, timeout=timeout)
     # check the response code
     if response.status_code != 200:
+        if raise_on_error:
+            raise requests.HTTPError(f"HTTP {response.status_code}", response=response)
         print(f"Error: {response.status_code}")
         print(f"  while fetching {url}")
         print(response.text)

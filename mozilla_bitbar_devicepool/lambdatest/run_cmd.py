@@ -2,18 +2,68 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this file,
 # You can obtain one at http://mozilla.org/MPL/2.0/.
 
+import json
 import logging
 import os
+import re
+import shlex
 import shutil
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from glob import glob
 
 from tqdm import tqdm
 
+_ENVIRONMENT_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*$")
 
-def generate_config(udid, command, queue_timeout=900):
+
+def parse_environment(assignments):
+    """Parse NAME=VALUE assignments for the device-side script environment."""
+    environment = {}
+    for assignment in assignments or []:
+        name, separator, value = assignment.partition("=")
+        if not separator or not _ENVIRONMENT_NAME.fullmatch(name):
+            raise ValueError(f"invalid environment variable assignment: {assignment!r}; expected NAME=VALUE")
+        if name == "CMD_TO_RUN":
+            raise ValueError("CMD_TO_RUN is reserved by lt_run_cmd")
+        if name in environment:
+            raise ValueError(f"duplicate environment variable: {name}")
+        environment[name] = value
+    return environment
+
+
+def validate_artifact_path(path):
+    """Return a safe relative artifact path or glob for the HE workspace."""
+    if not path or os.path.isabs(path):
+        raise ValueError("artifact paths must be non-empty relative paths")
+    parts = path.replace("\\", "/").split("/")
+    if any(part in ("", "..") for part in parts):
+        raise ValueError(f"unsafe artifact path: {path!r}")
+    return "/".join(parts)
+
+
+def artifact_directory(artifacts_root, udid):
+    """Return the persistent artifact directory for a device serial."""
+    if not udid or udid in (".", "..") or any(char not in "-_." and not char.isalnum() for char in udid):
+        raise ValueError(f"unsafe device serial for artifact directory: {udid!r}")
+    return os.path.join(artifacts_root, udid)
+
+
+def missing_required_artifacts(artifacts_dir, required_artifact_globs):
+    return [
+        artifact_glob
+        for artifact_glob in required_artifact_globs or []
+        # HyperExecute nests each downloaded payload below its artifact name and
+        # attempt number (for example, extra-artifact-1/1/<payload>). Search
+        # beneath the device directory rather than assuming a flat download.
+        if not glob(os.path.join(artifacts_dir, "**", artifact_glob), recursive=True)
+    ]
+
+
+def generate_config(udid, command, queue_timeout=900, artifact_paths=None, environment=None):
     fixed_ip_line = f'fixedIP: "{udid}"'
+    environment_lines = "".join(f"  {name}: {json.dumps(value)}\n" for name, value in (environment or {}).items())
     config = f"""version: "0.2"
 
 autosplit: true
@@ -27,6 +77,7 @@ testDiscovery:
 
 env:
   CMD_TO_RUN: {command!r}
+{environment_lines}
 
 testRunnerCommand: bash ./user_script/run_cmd_on_device.sh
 
@@ -38,6 +89,13 @@ uploadArtifacts:
   - name: run-cmd-output
     path:
       - output.txt
+"""
+    for index, artifact_path in enumerate(artifact_paths or [], start=1):
+        config += f"""  - name: extra-artifact-{index}
+    path:
+      - {json.dumps(artifact_path)}
+"""
+    config += f"""
 
 framework:
   name: raw
@@ -59,16 +117,31 @@ framework:
     return config
 
 
-def run_on_device(udid, command, project_root_dir, user_script_dir, timeout=1800, queue_timeout=900, script_path=None):
+def run_on_device(
+    udid,
+    command,
+    project_root_dir,
+    user_script_dir,
+    timeout=1800,
+    queue_timeout=900,
+    script_path=None,
+    labels=None,
+    artifacts_root=None,
+    artifact_paths=None,
+    required_artifact_globs=None,
+    environment=None,
+):
     timestamp = time.time_ns()
     temp_dir = f"/tmp/mozilla-lt-run-cmd.{udid}.{timestamp}"
-    artifacts_dir = os.path.join(temp_dir, "artifacts")
+    artifacts_dir = artifact_directory(artifacts_root, udid) if artifacts_root else os.path.join(temp_dir, "artifacts")
     config_path = os.path.join(temp_dir, "hyperexecute.yaml")
 
     try:
         shutil.rmtree(temp_dir, ignore_errors=True)
         os.makedirs(temp_dir, exist_ok=True)
         os.makedirs(artifacts_dir, exist_ok=True)
+        if artifacts_root:
+            logging.warning(f"run_on_device [{udid}]: preserving artifacts at {artifacts_dir}")
 
         shutil.copytree(user_script_dir, os.path.join(temp_dir, "user_script"))
 
@@ -77,18 +150,24 @@ def run_on_device(udid, command, project_root_dir, user_script_dir, timeout=1800
             shutil.copy2(script_path, dest)
             os.chmod(dest, 0o755)
 
-        config = generate_config(udid, command, queue_timeout=queue_timeout)
+        config = generate_config(
+            udid,
+            command,
+            queue_timeout=queue_timeout,
+            artifact_paths=artifact_paths,
+            environment=environment,
+        )
         with open(config_path, "w") as f:
             f.write(config)
 
         hyperexecute_path = os.path.join(project_root_dir, "hyperexecute")
-        labels_csv = f"run-cmd,{udid}"
+        labels_csv = ",".join(["run-cmd", udid, *(labels or [])])
         cmd = (
             f"{hyperexecute_path}"
-            f" --labels '{labels_csv}'"
+            f" --labels {shlex.quote(labels_csv)}"
             f" --exclude-external-binaries"
             f" --download-artifacts"
-            f" --download-artifacts-path {artifacts_dir}"
+            f" --download-artifacts-path {shlex.quote(artifacts_dir)}"
             f" --force-clean-artifacts"
             f" -i {config_path}"
         )
@@ -138,6 +217,12 @@ def run_on_device(udid, command, project_root_dir, user_script_dir, timeout=1800
 
         if result.returncode == 0:
             status = "ok"
+            missing_globs = missing_required_artifacts(artifacts_dir, required_artifact_globs)
+            if missing_globs:
+                status = "failed"
+                logging.error(
+                    f"run_on_device [{udid}]: missing required artifact(s) in {artifacts_dir}: {', '.join(missing_globs)}"
+                )
         elif _is_queue_timeout(result.stdout + result.stderr):
             status = "queue_timeout"
         else:
@@ -196,6 +281,11 @@ def _run_batch(
     timeout,
     queue_timeout,
     script_path,
+    labels,
+    artifacts_root,
+    artifact_paths,
+    required_artifact_globs,
+    environment,
     label="",
     start_delay=5,
     on_update=None,
@@ -207,18 +297,30 @@ def _run_batch(
             if i > 0 and start_delay > 0:
                 time.sleep(start_delay)
             future = executor.submit(
-                run_on_device, udid, command, project_root_dir, user_script_dir, timeout, queue_timeout, script_path
+                run_on_device,
+                udid,
+                command,
+                project_root_dir,
+                user_script_dir,
+                timeout,
+                queue_timeout,
+                script_path,
+                labels,
+                artifacts_root,
+                artifact_paths,
+                required_artifact_globs,
+                environment,
             )
             futures[future] = udid
         succeeded = 0
-        with tqdm(total=len(futures), desc=label or "devices", unit="device", ncols=80) as bar:
+        with tqdm(total=len(futures), desc=label or "devices", unit="device", dynamic_ncols=True) as bar:
             for future in as_completed(futures):
                 udid, output, status = future.result()
                 results[udid] = (output, status)
                 if status == "ok":
                     succeeded += 1
                 bar_status = {"ok": "OK", "failed": "FAIL", "queue_timeout": "TIMEOUT"}.get(status, status)
-                bar.set_postfix_str(f"{succeeded}/{len(futures)} completed, {udid} [{bar_status}]")
+                bar.set_postfix_str(f"{succeeded}/{len(futures)} completed (latest: {udid} [{bar_status}])")
                 bar.update(1)
                 if on_update:
                     on_update(results)
@@ -237,6 +339,11 @@ def run_on_all_devices(
     max_retries=5,
     retry_wait=10,
     start_delay=1,
+    labels=None,
+    artifacts_root=None,
+    artifact_paths=None,
+    required_artifact_globs=None,
+    environment=None,
     on_update=None,
 ):
     results = _run_batch(
@@ -248,6 +355,11 @@ def run_on_all_devices(
         timeout,
         queue_timeout,
         script_path,
+        labels,
+        artifacts_root,
+        artifact_paths,
+        required_artifact_globs,
+        environment,
         label=f"attempt 1/{max_retries + 1}",
         start_delay=start_delay,
         on_update=on_update,
@@ -270,6 +382,11 @@ def run_on_all_devices(
             timeout,
             queue_timeout,
             script_path,
+            labels,
+            artifacts_root,
+            artifact_paths,
+            required_artifact_globs,
+            environment,
             label=f"attempt {attempt + 1}/{max_retries + 1}",
             start_delay=start_delay,
             on_update=lambda partial: on_update({**results, **partial}) if on_update else None,

@@ -20,9 +20,12 @@ def array_key_search(prefix_match, search_array):
 
 # example input: ["tcdp","a55-perf","R5CXC1PW7CR"]
 # should return "R5CXC1PW7CR"
-def get_device_from_job_labels(job_labels):
+def get_device_from_job_labels(job_labels, known_device_ids=None):
     if not job_labels:
         return None
+    if known_device_ids is not None:
+        known_device_ids = set(known_device_ids)
+        return next((label for label in job_labels if label in known_device_ids), None)
     # find the first label that looks like a device udid
     for label in job_labels:
         if label == "tcdp":
@@ -32,6 +35,13 @@ def get_device_from_job_labels(job_labels):
         else:
             return label
     return None
+
+
+def get_pool_from_job_labels(job_labels, known_pools):
+    if not job_labels:
+        return "unknown"
+    known_pools = set(known_pools)
+    return next((label for label in job_labels if label in known_pools), "unknown")
 
 
 # e.g. '["tcdp","a55-perf","R5CXC1PW7CR"]' to ['tcdp', 'a55-perf', 'R5CXC1PW7CR']

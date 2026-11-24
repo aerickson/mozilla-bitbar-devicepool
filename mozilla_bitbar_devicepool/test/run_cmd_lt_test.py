@@ -1,0 +1,209 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this file,
+# You can obtain one at http://mozilla.org/MPL/2.0/.
+
+import os
+import shlex
+import subprocess
+import sys
+
+import pytest
+
+from mozilla_bitbar_devicepool import run_cmd_lt
+from mozilla_bitbar_devicepool.lambdatest import run_cmd
+
+
+def test_generate_config_includes_opt_in_artifact_paths():
+    config = run_cmd.generate_config("SERIAL", "echo hello", artifact_paths=["fleetbench-artifacts/**"])
+
+    assert "- output.txt" in config
+    assert '- "fleetbench-artifacts/**"' in config
+
+
+def test_generate_config_includes_script_environment():
+    config = run_cmd.generate_config(
+        "SERIAL",
+        "echo hello",
+        environment={"RUN_LABEL": "nightly", "EMPTY": ""},
+    )
+
+    assert '  RUN_LABEL: "nightly"' in config
+    assert '  EMPTY: ""' in config
+
+
+def test_parse_environment_accepts_values_and_rejects_invalid_names():
+    assert run_cmd.parse_environment(["RUN_LABEL=nightly", "EMPTY="]) == {"RUN_LABEL": "nightly", "EMPTY": ""}
+
+    with pytest.raises(ValueError, match="expected NAME=VALUE"):
+        run_cmd.parse_environment(["NOT_AN_ASSIGNMENT"])
+    with pytest.raises(ValueError, match="CMD_TO_RUN is reserved"):
+        run_cmd.parse_environment(["CMD_TO_RUN=echo nope"])
+    with pytest.raises(ValueError, match="duplicate environment variable: RUN_LABEL"):
+        run_cmd.parse_environment(["RUN_LABEL=first", "RUN_LABEL=second"])
+
+
+@pytest.mark.parametrize("path", ["", "/tmp/output", "../output", "output/../secret", "output//nested"])
+def test_validate_artifact_path_rejects_unsafe_paths(path):
+    with pytest.raises(ValueError):
+        run_cmd.validate_artifact_path(path)
+
+
+def test_run_on_device_preserves_artifacts_and_validates_required_globs(tmp_path, monkeypatch):
+    user_script_dir = tmp_path / "user_script"
+    user_script_dir.mkdir()
+    (user_script_dir / "run_cmd_on_device.sh").write_text("#!/bin/bash\n")
+    artifacts_root = tmp_path / "persistent-artifacts"
+
+    def fake_run(cmd, **_kwargs):
+        artifacts_dir = shlex.split(cmd)[shlex.split(cmd).index("--download-artifacts-path") + 1]
+        output_dir = os.path.join(artifacts_dir, "run-cmd-output", "1")
+        fleetbench_dir = os.path.join(artifacts_dir, "extra-artifact-1", "1", "fleetbench-artifacts")
+        os.makedirs(output_dir, exist_ok=True)
+        os.makedirs(os.path.join(fleetbench_dir, "nested"), exist_ok=True)
+        with open(os.path.join(output_dir, "output.txt"), "w") as artifact_file:
+            artifact_file.write("command output")
+        with open(os.path.join(fleetbench_dir, "nested", "result.json"), "w") as artifact_file:
+            artifact_file.write("{}")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(run_cmd.subprocess, "run", fake_run)
+
+    result = run_cmd.run_on_device(
+        "SERIAL",
+        "echo hello",
+        str(tmp_path),
+        str(user_script_dir),
+        artifacts_root=str(artifacts_root),
+        artifact_paths=["fleetbench-artifacts/**"],
+        required_artifact_globs=["fleetbench-artifacts/**/*.json"],
+    )
+
+    assert result == ("SERIAL", "command output", "ok")
+    assert (
+        artifacts_root / "SERIAL" / "extra-artifact-1" / "1" / "fleetbench-artifacts" / "nested" / "result.json"
+    ).is_file()
+
+
+def test_run_on_device_fails_when_required_artifact_is_missing(tmp_path, monkeypatch):
+    user_script_dir = tmp_path / "user_script"
+    user_script_dir.mkdir()
+    (user_script_dir / "run_cmd_on_device.sh").write_text("#!/bin/bash\n")
+    artifacts_root = tmp_path / "persistent-artifacts"
+
+    def fake_run(cmd, **_kwargs):
+        artifacts_dir = shlex.split(cmd)[shlex.split(cmd).index("--download-artifacts-path") + 1]
+        os.makedirs(artifacts_dir, exist_ok=True)
+        with open(os.path.join(artifacts_dir, "output.txt"), "w") as artifact_file:
+            artifact_file.write("command output")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(run_cmd.subprocess, "run", fake_run)
+
+    result = run_cmd.run_on_device(
+        "SERIAL",
+        "echo hello",
+        str(tmp_path),
+        str(user_script_dir),
+        artifacts_root=str(artifacts_root),
+        required_artifact_globs=["fleetbench-artifacts/**/*.json"],
+    )
+
+    assert result == ("SERIAL", "command output", "failed")
+
+
+def test_required_artifact_is_checked_after_retrying_queue_timeout(tmp_path, monkeypatch):
+    user_script_dir = tmp_path / "user_script"
+    user_script_dir.mkdir()
+    attempts = []
+
+    def fake_run(cmd, **_kwargs):
+        attempts.append(cmd)
+        if len(attempts) == 1:
+            return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="queue timeout")
+        args = shlex.split(cmd)
+        artifacts_dir = args[args.index("--download-artifacts-path") + 1]
+        for name, contents in (("output.txt", "command output"), ("result.json", "{}")):
+            with open(os.path.join(artifacts_dir, name), "w") as artifact_file:
+                artifact_file.write(contents)
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(run_cmd.subprocess, "run", fake_run)
+
+    result = run_cmd.run_on_all_devices(
+        ["SERIAL"],
+        "echo hello",
+        str(tmp_path),
+        str(user_script_dir),
+        max_retries=1,
+        retry_wait=0,
+        start_delay=0,
+        required_artifact_globs=["result.json"],
+    )
+
+    assert len(attempts) == 2
+    assert result == {"SERIAL": ("command output", "ok")}
+
+
+def test_run_batch_progress_identifies_the_latest_completed_device(monkeypatch):
+    postfixes = []
+    progress_options = []
+
+    class FakeProgressBar:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            pass
+
+        def set_postfix_str(self, value):
+            postfixes.append(value)
+
+        def update(self, _count):
+            pass
+
+    def fake_tqdm(**kwargs):
+        progress_options.append(kwargs)
+        return FakeProgressBar()
+
+    monkeypatch.setattr(run_cmd, "tqdm", fake_tqdm)
+    monkeypatch.setattr(
+        run_cmd,
+        "run_on_device",
+        lambda udid, *_args: (udid, "", "ok"),
+    )
+
+    run_cmd._run_batch(
+        ["SERIAL"],
+        "echo hello",
+        ".",
+        ".",
+        max_parallel=1,
+        timeout=1,
+        queue_timeout=1,
+        script_path=None,
+        labels=[],
+        artifacts_root=None,
+        artifact_paths=[],
+        required_artifact_globs=[],
+        environment={},
+    )
+
+    assert postfixes == ["1/1 completed (latest: SERIAL [OK])"]
+    assert progress_options == [{"total": 1, "desc": "devices", "unit": "device", "dynamic_ncols": True}]
+
+
+def test_main_rejects_duplicate_devices_before_launch(monkeypatch, capsys):
+    class FakeConfiguration:
+        def __init__(self, lightweight):
+            self.config = {"device_groups": {}}
+
+        def configure(self):
+            pass
+
+    monkeypatch.setattr(run_cmd_lt.configuration_lt, "ConfigurationLt", FakeConfiguration)
+    monkeypatch.setattr(sys, "argv", ["lt_run_cmd", "echo hello", "--device", "SERIAL", "--device", "SERIAL"])
+
+    with pytest.raises(SystemExit, match="1"):
+        run_cmd_lt.main()
+
+    assert "duplicate device serial(s): SERIAL" in capsys.readouterr().err

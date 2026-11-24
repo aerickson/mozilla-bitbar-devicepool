@@ -67,6 +67,39 @@ def main():
     parser.add_argument(
         "--format", choices=["text", "json", "csv"], default="text", help="Output format (default: text)"
     )
+    parser.add_argument(
+        "--label",
+        action="append",
+        default=[],
+        metavar="LABEL",
+        help="Additional HyperExecute job label (repeatable)",
+    )
+    parser.add_argument(
+        "--env",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help="Environment variable to pass to the device-side script (repeatable)",
+    )
+    parser.add_argument(
+        "--artifacts-dir",
+        metavar="DIR",
+        help="Directory for downloaded artifacts (default: <run directory>/artifacts)",
+    )
+    parser.add_argument(
+        "--artifact-path",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="Additional relative path or glob to upload from the HyperExecute workspace (repeatable)",
+    )
+    parser.add_argument(
+        "--require-artifact-glob",
+        action="append",
+        default=[],
+        metavar="GLOB",
+        help="Fail a device when this relative downloaded-artifact glob has no matches (repeatable)",
+    )
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
 
     args = parser.parse_args()
@@ -77,6 +110,14 @@ def main():
         parser.error("command and --script are mutually exclusive")
     if args.script and not os.path.isfile(args.script):
         parser.error(f"script file not found: {args.script}")
+    if any("," in label for label in args.label):
+        parser.error("labels must not contain commas; pass each label with a separate --label option")
+    try:
+        artifact_paths = [run_cmd.validate_artifact_path(path) for path in args.artifact_path]
+        required_artifact_globs = [run_cmd.validate_artifact_path(path) for path in args.require_artifact_glob]
+        environment = run_cmd.parse_environment(args.env)
+    except ValueError as exc:
+        parser.error(str(exc))
 
     log_level = logging.DEBUG if args.verbose else logging.WARNING
     handler = _TqdmLoggingHandler()
@@ -112,12 +153,18 @@ def main():
     if not udids:
         print("ERROR: no devices to target", file=sys.stderr)
         sys.exit(1)
+    duplicate_udids = sorted({udid for udid in udids if udids.count(udid) > 1})
+    if duplicate_udids:
+        print(f"ERROR: duplicate device serial(s): {', '.join(duplicate_udids)}", file=sys.stderr)
+        sys.exit(1)
 
     print(f"Targeting {len(udids)} device(s): {', '.join(udids)}")
     if args.script:
         print(f"Script: {args.script}")
     else:
         print(f"Command: {args.command}")
+    if args.label:
+        print(f"Additional labels: {', '.join(args.label)}")
     print()
 
     # resolve paths
@@ -129,13 +176,21 @@ def main():
         print(f"ERROR: user_script dir not found: {user_script_dir}", file=sys.stderr)
         sys.exit(1)
 
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_dir = "lt_run_cmd_output"
-    os.makedirs(output_dir, exist_ok=True)
-    report_path = os.path.join(output_dir, f"lt_run_cmd_output_{timestamp}.md")
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    run_dir = os.path.abspath(os.path.join("lt_run_cmd_output", timestamp))
+    artifacts_root = os.path.abspath(args.artifacts_dir) if args.artifacts_dir else os.path.join(run_dir, "artifacts")
+    try:
+        for udid in udids:
+            run_cmd.artifact_directory(artifacts_root, udid)
+    except ValueError as exc:
+        parser.error(str(exc))
+    os.makedirs(run_dir, exist_ok=True)
+    os.makedirs(artifacts_root, exist_ok=True)
+    report_path = os.path.join(run_dir, "report.md")
     cmd_or_script = args.script if args.script else args.command
     start_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"Report: {report_path}")
+    print(f"Artifacts: {artifacts_root}")
     print(f"Spawning {len(udids)} HyperExecute jobs (1s delay between submissions)...")
 
     def write_report(partial_results, final=False):
@@ -150,7 +205,24 @@ def main():
             f.write("# lt_run_cmd report\n\n")
             f.write(f"**Date:** {start_time}\n\n")
             f.write(f"**Command/script:** `{cmd_or_script}`\n\n")
+            if args.label:
+                f.write(f"**Additional labels:** {', '.join(args.label)}\n\n")
             f.write(f"**Devices targeted:** {len(udids)}{status_note}\n\n")
+            f.write("## Artifacts\n\n")
+            f.write(f"**Root:** `{artifacts_root}`\n\n")
+            f.write("**Uploaded:** `output.txt`")
+            if artifact_paths:
+                f.write(f", {', '.join(f'`{item}`' for item in artifact_paths)}")
+            f.write("\n\n")
+            if required_artifact_globs:
+                f.write(f"**Required:** {', '.join(f'`{item}`' for item in required_artifact_globs)}\n\n")
+            for udid in sorted(partial_results):
+                device_artifacts_dir = run_cmd.artifact_directory(artifacts_root, udid)
+                f.write(f"- `{udid}`: `{device_artifacts_dir}`\n")
+                missing = run_cmd.missing_required_artifacts(device_artifacts_dir, required_artifact_globs)
+                if missing:
+                    f.write(f"  - missing required artifact glob(s): {', '.join(f'`{item}`' for item in missing)}\n")
+            f.write("\n")
             f.write("## Results\n\n")
             f.write("```\n")
             f.write(formatted)
@@ -168,6 +240,11 @@ def main():
         max_retries=args.retries,
         retry_wait=args.retry_wait,
         start_delay=args.start_delay,
+        labels=args.label,
+        artifacts_root=artifacts_root,
+        artifact_paths=artifact_paths,
+        required_artifact_globs=required_artifact_globs,
+        environment=environment,
         on_update=write_report,
     )
 

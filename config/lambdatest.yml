@@ -32,10 +32,10 @@ projects:
     TASKCLUSTER_CLIENT_ID: project/autophone/gecko-t-lambda-stab
     TC_WORKER_TYPE: gecko-t-lambda-stab
   test-1:
-      # testing v9 userscripts: disables liveVideo in addition to video (RELOPS-2355)
-      # USER_SCRIPTS_VERSION: v9-disable-livevideo
-      TASKCLUSTER_CLIENT_ID: project/autophone/gecko-t-lambda-test-1
-      TC_WORKER_TYPE: gecko-t-lambda-test-1
+    # Disable HyperExecute network capture for live-site tests (Bug 2039991).
+    USER_SCRIPTS_VERSION: v10-disable-network-capture
+    TASKCLUSTER_CLIENT_ID: project/autophone/gecko-t-lambda-test-1
+    TC_WORKER_TYPE: gecko-t-lambda-test-1
 device_groups:
   a55-perf:
     # devices with power meters
